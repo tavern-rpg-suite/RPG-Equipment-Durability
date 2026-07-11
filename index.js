@@ -1,5 +1,5 @@
 import { getContext, extension_settings } from '../../../extensions.js';
-import { eventSource, event_types, saveSettingsDebounced, setExtensionPrompt, extension_prompt_roles, characters } from '../../../../script.js';
+import { eventSource, event_types, saveSettingsDebounced, saveSettings as stSaveSettings, setExtensionPrompt, extension_prompt_roles, characters } from '../../../../script.js';
 
 const MODULE_NAME = 'rpg_equipment';
 const PROMPT_KEY = 'rpg_equipment_injection';
@@ -44,6 +44,7 @@ const defaultSettings = {
     startBroken: true,
     patchChance: 35,
     patchWear: 5,
+    patchLimit: 3,
     affectHp: true,
     injectStats: true,
     autoWear: false,
@@ -83,6 +84,7 @@ const I18N = {
         inject_wearing: "{{user}}'s current outfit", inject_see: '{{char}} can see this',
         toast_equipped: 'Equipped: {name}', toast_removed: 'Slot cleared.',
         toast_patch_ok: 'Field patch held! +{n} durability.', toast_patch_fail: 'The patch did not hold.',
+        toast_patch_none: "This piece is too frayed for another field patch — it needs a proper repair.", patch_left: '{n} patch(es) left.',
         toast_repaired: 'Repaired: {name}.', toast_broke: '{name} broke!',
         repair_with: 'Repair with an item:', pick_material: '— pick a material —', do_repair: 'Use item to repair',
         no_inv_repair: 'Enable the inventory module to repair with items.', no_materials: 'Your backpack is empty.',
@@ -98,7 +100,7 @@ const I18N = {
         set_api: 'API Settings', set_logic: 'Durability',
         set_decay_every: 'Durability drops every (messages):', set_decay_amount: 'Durability lost each time:',
         set_patch: 'Field-patch success chance (%):', set_depth: 'Context injection depth:',
-        set_patchwear: 'Max durability lost per field-patch:', set_affecthp: 'Armor reduces incoming damage (HP)', set_injectstats: 'Add armor/weapon stats to the prompt', set_autowear: 'AI wears gear from the story (damages the item the scene hits)', set_startbroken: 'New gear starts broken (needs repair)', wear_changed: 'Wear:',
+        set_patchwear: 'Max durability lost per field-patch:', set_patchlimit: 'Field patches per item (successful):', set_affecthp: 'Armor reduces incoming damage (HP)', set_injectstats: 'Add armor/weapon stats to the prompt', set_autowear: 'AI wears gear from the story (damages the item the scene hits)', set_startbroken: 'New gear starts broken (needs repair)', wear_changed: 'Wear:',
         set_lang: 'Language:', set_url: 'URL', set_key: 'API Key', set_model: 'Model'
     },
     ru: {
@@ -118,6 +120,7 @@ const I18N = {
         inject_wearing: 'Текущий наряд {{user}}', inject_see: '{{char}} это видит',
         toast_equipped: 'Надето: {name}', toast_removed: 'Слот очищен.',
         toast_patch_ok: 'Заплатка держится! +{n} прочности.', toast_patch_fail: 'Заплатка не удержалась.',
+        toast_patch_none: 'Вещь слишком истрепалась для новой заплатки — нужен полноценный ремонт.', patch_left: 'Осталось заплаток: {n}.',
         toast_repaired: 'Починено: {name}.', toast_broke: '{name} сломалось!',
         repair_with: 'Починить предметом:', pick_material: '— выбери материал —', do_repair: 'Чинить предметом',
         no_inv_repair: 'Включи модуль инвентаря, чтобы чинить предметами.', no_materials: 'Рюкзак пуст.',
@@ -133,7 +136,7 @@ const I18N = {
         set_api: 'Настройки API', set_logic: 'Прочность',
         set_decay_every: 'Прочность падает каждые (сообщений):', set_decay_amount: 'Сколько прочности теряется за раз:',
         set_patch: 'Шанс успеха заплатки (%):', set_depth: 'Глубина вставки в контекст:',
-        set_patchwear: 'Потеря макс. прочности за заплатку:', set_affecthp: 'Броня снижает входящий урон (HP)', set_injectstats: 'Добавлять статы брони/оружия в подсказку', set_autowear: 'ИИ изнашивает экипировку по сюжету (снимает с той вещи, что задело)', set_startbroken: 'Новая экипировка появляется сломанной (нужен ремонт)', wear_changed: 'Износ:',
+        set_patchwear: 'Потеря макс. прочности за заплатку:', set_patchlimit: 'Заплаток на вещь (удачных):', set_affecthp: 'Броня снижает входящий урон (HP)', set_injectstats: 'Добавлять статы брони/оружия в подсказку', set_autowear: 'ИИ изнашивает экипировку по сюжету (снимает с той вещи, что задело)', set_startbroken: 'Новая экипировка появляется сломанной (нужен ремонт)', wear_changed: 'Износ:',
         set_lang: 'Язык:', set_url: 'URL', set_key: 'API-ключ', set_model: 'Модель'
     }
 };
@@ -149,8 +152,15 @@ function loadSettings() {
     settings = Object.assign({}, defaultSettings, extension_settings[MODULE_NAME]);
     if (!settings.chatStates) settings.chatStates = {};
 }
-function saveSettings() {
+function saveSettings(immediate = true) {
     extension_settings[MODULE_NAME] = settings;
+    // Discrete changes (equip, sharpen, patch…) flush to disk right away so a quick page reload can't
+    // lose them (the debounced save can be ~1s late and get dropped on refresh). Frequent per-message
+    // wear passes immediate=false to stay debounced and avoid hammering the server.
+    if (immediate && typeof stSaveSettings === 'function') {
+        try { const p = stSaveSettings(); if (p && typeof p.catch === 'function') p.catch(() => { }); return; }
+        catch (e) { /* fall back to debounced below */ }
+    }
     if (typeof saveSettingsDebounced === 'function') saveSettingsDebounced();
 }
 
@@ -165,15 +175,17 @@ function loadState() {
         if (!state.slots) state.slots = freshState().slots;
         for (const s of SLOTS) if (!(s in state.slots)) state.slots[s] = null;
         if (typeof state.msgCount !== 'number') state.msgCount = 0;
+        // hardening: any stat-bearing piece keeps a concrete valid grade in storage (never blank/undefined)
+        for (const s of SLOTS) { const it = state.slots[s]; if (it && (it.attack || it.armor)) it.grade = clampGrade(it.grade); }
     } else {
         state = freshState();
         settings.chatStates[chatId] = state;
     }
 }
-function saveState() {
+function saveState(immediate = true) {
     const chatId = getContext().chatId;
     if (chatId) settings.chatStates[chatId] = state;
-    saveSettings();
+    saveSettings(immediate);
 }
 
 async function callAI(systemPrompt, userPrompt) {
@@ -252,7 +264,7 @@ function combatWearArmor(raw) {
     const it = state.slots[s];
     it.dur = Math.max(0, it.dur - amt);
     if (it.dur <= 0) { it.dur = 0; it.broken = true; const dropped = maybeGradeDrop(it); toastr.warning(t('toast_broke', { name: it.name }) + (dropped ? ' ' + t('toast_gradedrop') : '')); }
-    saveState(); renderPanel(); buildInjection();
+    saveState(false); renderPanel(); buildInjection();
 }
 
 function decayTick(messageId) {
@@ -261,7 +273,7 @@ function decayTick(messageId) {
     if (!msg || msg.is_user || msg.is_system) return;
     state.msgCount = (state.msgCount || 0) + 1;
     const every = Math.max(1, settings.decayEvery || 6);
-    if (state.msgCount % every !== 0) { saveState(); return; }
+    if (state.msgCount % every !== 0) { saveState(false); return; }
     // steady baseline wear every so often; when AI narrative wear is also on, use a lighter baseline
     const base = settings.autoWear ? Math.max(1, Math.ceil((settings.decayAmount || 12) / 2)) : (settings.decayAmount || 12);
     let broke = null, dropped = false;
@@ -271,7 +283,7 @@ function decayTick(messageId) {
         it.dur = Math.max(0, it.dur - base);
         if (it.dur <= 0) { it.broken = true; broke = it.name; if (maybeGradeDrop(it)) dropped = true; }
     }
-    saveState();
+    saveState(false);
     renderPanel();
     buildInjection();
     if (broke) toastr.warning(t('toast_broke', { name: broke }) + (dropped ? ' ' + t('toast_gradedrop') : ''));
@@ -307,7 +319,7 @@ Respond strictly JSON: {"wear":[{"slot":"bottom","amount":15,"reason":"<short, i
             if (it.dur <= 0) { it.broken = true; broke = it.name; maybeGradeDrop(it); }
         }
         if (notes.length) {
-            saveState(); renderPanel(); buildInjection();
+            saveState(false); renderPanel(); buildInjection();
             toastr.info(t('wear_changed') + ' ' + notes.join(', '));
             if (broke) toastr.warning(t('toast_broke', { name: broke }));
         }
@@ -317,14 +329,20 @@ Respond strictly JSON: {"wear":[{"slot":"bottom","amount":15,"reason":"<short, i
 function patchItem(slot) {
     const it = state.slots[slot];
     if (!it) return;
-    // every patch frays the garment a little: its ceiling drops, so endless free patching is impossible
+    // A field patch is an emergency improvisation, not an endless free repair. Each item allows only
+    // a few SUCCESSFUL patches (settings.patchLimit); after that it must be properly repaired.
+    const limit = Math.max(1, parseInt(settings.patchLimit) || 3);
+    if (typeof it.patchesLeft !== 'number') it.patchesLeft = limit; // lazy init (covers old saves too)
+    if (it.patchesLeft <= 0) { toastr.warning(t('toast_patch_none')); return; } // exhausted → do nothing
+    // every patch attempt frays the garment a little: its ceiling drops
     const wear = Math.max(0, settings.patchWear || 0);
     if (wear > 0) it.max = Math.max(10, (it.max || 100) - wear);
     if (Math.random() * 100 <= (settings.patchChance || 35)) {
         const gain = Math.floor((it.max || 100) * 0.2);
         it.dur = Math.min(it.max || 100, it.dur + gain);
         it.broken = false;
-        toastr.success(t('toast_patch_ok', { n: gain }));
+        it.patchesLeft = Math.max(0, it.patchesLeft - 1); // only a patch that HOLDS uses up a charge
+        toastr.success(t('toast_patch_ok', { n: gain }) + ' ' + t('patch_left', { n: it.patchesLeft }));
     } else {
         it.dur = Math.min(it.max || 100, it.dur);
         toastr.error(t('toast_patch_fail'));
@@ -335,6 +353,7 @@ function repairItem(slot) {
     const it = state.slots[slot];
     if (!it) return;
     it.dur = it.max || 100; it.broken = false;
+    it.patchesLeft = Math.max(1, parseInt(settings.patchLimit) || 3); // a proper repair renews field patches
     saveState(); renderPanel(); buildInjection();
     toastr.success(t('toast_repaired', { name: it.name }));
 }
@@ -348,7 +367,7 @@ function equipSlot(slot, name, desc, max, dur) {
     let d = parseInt(dur);
     if (!isFinite(d)) d = m;              // blank → full
     d = Math.max(0, Math.min(m, d));      // clamp to 0..max
-    state.slots[slot] = { id: genId(), name: name, desc: desc || '', dur: d, max: m, broken: d <= 0, armor: SLOT_BASE_ARMOR[slot] || 0, attack: SLOT_BASE_ATTACK[slot] || 0 };
+    state.slots[slot] = { id: genId(), name: name, desc: desc || '', dur: d, max: m, broken: d <= 0, grade: rollGrade(), armor: SLOT_BASE_ARMOR[slot] || 0, attack: SLOT_BASE_ATTACK[slot] || 0 };
     pendingSlot = null;
     saveState(); renderPanel(); buildInjection();
     toastr.success(t('toast_equipped', { name }));
@@ -443,7 +462,7 @@ async function equipFromInventory(slot, invId) {
     }
     const max = (typeof it.max === 'number') ? it.max : 100;
     const dur = (typeof it.dur === 'number') ? it.dur : max;
-    state.slots[slot] = { id: genId(), name: it.name, desc: it.desc || '', type: it.type, dur: dur, max: max, broken: !!it.broken || dur <= 0, grade: clampGrade(it.grade || rollGrade()), armor: (typeof it.armor === 'number') ? it.armor : (SLOT_BASE_ARMOR[slot] || 0), attack: (typeof it.attack === 'number') ? it.attack : (SLOT_BASE_ATTACK[slot] || 0), buff: (it.buff && it.buff.name) ? it.buff : undefined };
+    state.slots[slot] = { id: genId(), name: it.name, desc: it.desc || '', type: it.type, dur: dur, max: max, broken: !!it.broken || dur <= 0, grade: clampGrade(it.grade || rollGrade()), armor: (typeof it.armor === 'number') ? it.armor : (SLOT_BASE_ARMOR[slot] || 0), attack: (typeof it.attack === 'number') ? it.attack : (SLOT_BASE_ATTACK[slot] || 0), buff: (it.buff && it.buff.name) ? it.buff : undefined, patchesLeft: (typeof it.patchesLeft === 'number') ? it.patchesLeft : undefined };
     dropWornBuff(slot); // clear any leftover from a previous piece in this slot
     if (state.slots[slot].buff) applyWornBuff(slot, state.slots[slot].buff);
     inv.remove(invId);
@@ -491,7 +510,7 @@ function unequipToInventory(slot) {
     const it = state.slots[slot]; if (!it) return;
     const inv = invApi();
     dropWornBuff(slot);
-    if (inv) { inv.add({ name: it.name, desc: it.desc, type: it.type, dur: it.dur, max: it.max, broken: it.broken, grade: clampGrade(it.grade), armor: it.armor, attack: it.attack, buff: it.buff }); toastr.success(t('toast_unequipped', { name: it.name })); }
+    if (inv) { inv.add({ name: it.name, desc: it.desc, type: it.type, dur: it.dur, max: it.max, broken: it.broken, grade: clampGrade(it.grade), armor: it.armor, attack: it.attack, buff: it.buff, patchesLeft: it.patchesLeft }); toastr.success(t('toast_unequipped', { name: it.name })); }
     else { toastr.info(t('toast_discarded')); }
     state.slots[slot] = null; detailSlot = null;
     saveState(); renderPanel(); buildInjection();
@@ -645,8 +664,13 @@ function buildReport() {
                     <button class="eqd-btn eqd-btn-fix rpg-eq-dorepair" data-slot="${sl}">${escapeHtml(t('do_repair'))}</button></div>` : `<p class="eqd-desc">${escapeHtml(t('no_materials'))}</p>`;
             }
         }
+        const pLimit = Math.max(1, parseInt(settings.patchLimit) || 3);
+        const pLeft = (typeof it.patchesLeft === 'number') ? it.patchesLeft : pLimit;
+        const patchBtn = pLeft > 0
+            ? `<button class="eqd-btn eqd-btn-patch rpg-eq-patch" data-slot="${sl}">${escapeHtml(t('patch'))} (${pLeft})</button>`
+            : `<button class="eqd-btn eqd-btn-patch rpg-eq-patch" data-slot="${sl}" disabled title="${escapeHtml(t('toast_patch_none'))}">${escapeHtml(t('patch'))} ✕</button>`;
         repairInner = `<div class="eqd-repair-h">${escapeHtml(t('repair_with'))}</div>
-            <div class="eqd-row"><button class="eqd-btn eqd-btn-patch rpg-eq-patch" data-slot="${sl}">${escapeHtml(t('patch'))}</button></div>
+            <div class="eqd-row">${patchBtn}</div>
             ${mat}`;
     }
     return `<div class="eqd-rpt-in">
@@ -788,6 +812,10 @@ function settingsHtml() {
                 <label>${t('set_patchwear')}</label>
                 <input type="number" id="rpg-eq-patchwear" class="text_pole" min="0" max="100" style="width:55px;">
             </div>
+            <div class="flex-container alignitemscenter flexgap5 margin-b-10">
+                <label>${t('set_patchlimit')}</label>
+                <input type="number" id="rpg-eq-patchlimit" class="text_pole" min="1" max="20" style="width:55px;">
+            </div>
             <label class="checkbox_label"><input type="checkbox" id="rpg-eq-affecthp"> ${t('set_affecthp')}</label>
             <label class="checkbox_label"><input type="checkbox" id="rpg-eq-injectstats"> ${t('set_injectstats')}</label>
             <label class="checkbox_label"><input type="checkbox" id="rpg-eq-autowear"> ${t('set_autowear')}</label>
@@ -828,6 +856,7 @@ function setupUI() {
     $('#rpg-eq-decay-amount').val(settings.decayAmount).on('change', function () { settings.decayAmount = Math.max(1, parseInt($(this).val()) || 10); saveSettings(); });
     $('#rpg-eq-patch').val(settings.patchChance).on('change', function () { settings.patchChance = Math.min(100, Math.max(0, parseInt($(this).val()) || 0)); saveSettings(); });
     $('#rpg-eq-patchwear').val(settings.patchWear).on('change', function () { settings.patchWear = Math.min(100, Math.max(0, parseInt($(this).val()) || 0)); saveSettings(); });
+    $('#rpg-eq-patchlimit').val(settings.patchLimit).on('change', function () { settings.patchLimit = Math.min(20, Math.max(1, parseInt($(this).val()) || 3)); saveSettings(); renderPanel(); });
     $('#rpg-eq-affecthp').prop('checked', settings.affectHp !== false).on('change', function () { settings.affectHp = this.checked; saveSettings(); buildInjection(); });
     $('#rpg-eq-injectstats').prop('checked', settings.injectStats !== false).on('change', function () { settings.injectStats = this.checked; saveSettings(); buildInjection(); });
     $('#rpg-eq-autowear').prop('checked', !!settings.autoWear).on('change', function () { settings.autoWear = this.checked; saveSettings(); });
@@ -874,6 +903,7 @@ window.RPG.equipment = {
         const it = state.slots[slot]; const g = clampGrade(it.grade);
         if (g >= GRADE_MAX) return g;
         it.grade = g + 1; it.dur = it.max || 100; it.broken = false;
+        it.patchesLeft = Math.max(1, parseInt(settings.patchLimit) || 3); // sharpening renews field patches
         saveState(); renderPanel(); buildInjection();
         return it.grade;
     },
@@ -889,6 +919,7 @@ window.RPG.equipment = {
         if (amount == null) it.dur = it.max || 100;
         else it.dur = Math.min(it.max || 100, it.dur + Math.round((it.max || 100) * (amount / 100)));
         if (it.dur > 0) it.broken = false;
+        it.patchesLeft = Math.max(1, parseInt(settings.patchLimit) || 3); // a repair kit renews field patches
         saveState(); renderPanel(); buildInjection();
         return true;
     },

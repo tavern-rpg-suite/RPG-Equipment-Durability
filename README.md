@@ -50,6 +50,8 @@ Exposes `window.RPG.equipment`: `isEnabled()`, `list()` (includes `grade` / `gra
 
 ## 🩺 Troubleshooting
 
+- **Grade reset after a page reload.** Fixed in 1.11.3 — discrete gear changes (equip, sharpen, repair, auto‑outfit) now save to disk immediately instead of via the ~1s debounced save, which could be dropped on a quick refresh. Frequent per‑message wear stays debounced. Grade is also normalised to a concrete value on load.
+- **The field patch repaired forever.** Fixed in 1.11.2 — each item allows only a few *successful* field patches (default 3, set **Field patches per item** in settings, 1–20). Since 1.11.3, a **proper repair renews the patch allowance**: sharpening, a vendor repair kit, repairing with a backpack material, or a GM full‑repair all reset the count. The button shows the remaining count and disables when spent; a failed attempt doesn't cost a charge, and the count travels with the piece through the backpack.
 - **Quality changed when I re‑equipped a piece.** Fixed in 1.11.0 — grade is stored on the item and kept through unequip/equip.
 - **I couldn't put shoes in Boots / a dress in Top.** Fixed in 1.11.1 — the slot‑type guard now only blocks clearly‑wrong types (weapon/accessory/food); ordinary clothing/`misc` goes on the body.
 - **"Outfit from my description" did nothing.** Fixed in 1.11.0 — it now reads your Persona description (with fallbacks) and warns clearly if there's no description to use.
