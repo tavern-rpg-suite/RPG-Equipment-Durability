@@ -4,6 +4,29 @@ import { eventSource, event_types, saveSettingsDebounced, setExtensionPrompt, ex
 const MODULE_NAME = 'rpg_equipment';
 const PROMPT_KEY = 'rpg_equipment_injection';
 const SLOTS = ['head', 'top', 'bottom', 'boots', 'accessory', 'weapon'];
+// ── Grade (градация) 1..4: multiplies a piece's base attack/armor, and drives its glow ──
+const GRADE_MAX = 4;
+const GRADE_MULT = { 1: 1, 2: 1.4, 3: 1.9, 4: 2.6 };           // stat multiplier per grade
+const GRADE_COLOR = { 1: '#9e9e9e', 2: '#4f83cc', 3: '#8a5cc4', 4: '#d9a441' }; // grey / blue / purple / gold
+function clampGrade(g) { g = parseInt(g); return (g >= 1 && g <= GRADE_MAX) ? g : 1; }
+function gradeMult(g) { return GRADE_MULT[clampGrade(g)] || 1; }
+// weighted random grade for gear that arrives in the world: legendary ~3%
+function rollGrade() { const r = Math.random() * 100; if (r < 3) return 4; if (r < 15) return 3; if (r < 45) return 2; return 1; }
+// new gear entering the world starts broken (dur 0) if the option is on — respects an item that's explicitly not broken only when the option is off
+function startState(itBroken) { if (settings.startBroken) return { dur: 0, broken: true }; return { dur: 100, broken: !!itBroken }; }
+// ── hard type→slot rules: an accessory can't go on the torso, a weapon can't be a hat, food can't be worn ──
+const NON_EQUIP_TYPES = ['food', 'consumable', 'material'];
+// Only block what's clearly wrong; let clothing/armour/misc/unknown into body slots (fine cases go to the AI check).
+function slotTypeOk(slot, type) {
+    if (!type) return true;
+    type = String(type).toLowerCase();
+    if (NON_EQUIP_TYPES.includes(type)) return false;   // food/potions/materials are never worn
+    if (slot === 'weapon') return type === 'weapon';    // the weapon slot takes weapons only
+    if (type === 'weapon') return false;                // a weapon can't go in a body/accessory slot
+    if (slot === 'accessory') return true;              // the accessory slot takes accessory/misc/jewellery/etc
+    if (type === 'accessory') return false;             // accessories don't go on the body (head/top/bottom/boots)
+    return true;                                        // clothing / armour / misc / unknown → fine on the body
+}
 const SLOT_ICONS = { head: 'fa-hat-cowboy', top: 'fa-shirt', bottom: 'fa-person', boots: 'fa-shoe-prints', accessory: 'fa-gem', weapon: 'fa-khanda' };
 // base stats a fresh item in each slot is worth; armor mitigates damage, weapon adds attack.
 const SLOT_BASE_ARMOR = { head: 3, top: 6, bottom: 4, boots: 3, accessory: 1, weapon: 0 };
@@ -16,8 +39,9 @@ const defaultSettings = {
     model: 'google/gemma-4-31b-it',
     temperature: 0.8,
     language: 'en',
-    decayEvery: 8,
-    decayAmount: 10,
+    decayEvery: 6,
+    decayAmount: 12,
+    startBroken: true,
     patchChance: 35,
     patchWear: 5,
     affectHp: true,
@@ -51,7 +75,7 @@ const I18N = {
         from_backpack: 'Wear from backpack:', pick_item: '— pick an item —', or_new: '— or add a new item —',
         unequip: 'Unequip → backpack', discard: 'Discard',
         toast_unequipped: 'Moved to backpack: {name}.', toast_discarded: 'Item discarded.',
-        set_aicheck: 'AI-check what you put on', toast_checking: 'Checking the fit...', toast_wrong_slot: "{name} can't go in the {slot} slot: {reason}", save: 'Save', cancel: 'Cancel',
+        set_aicheck: 'AI-check what you put on', toast_checking: 'Checking the fit...', toast_wrong_slot: "{name} can't go in the {slot} slot: {reason}", wrong_type_reason: 'wrong kind of item for that slot', save: 'Save', cancel: 'Cancel',
         name_ph: 'Item name', desc_ph: 'Short description (optional)', max_ph: 'Max', dur_ph: 'Durability',
         patch: 'Patch', repair: 'Repair', remove: 'Remove',
         edit_mode: 'Edit mode', auto_outfit: 'Outfit from my description',
@@ -65,16 +89,16 @@ const I18N = {
         rep_checking: 'Trying to mend it...', rep_rejected: "Can't fix it with {item}: {reason}",
         rep_ok: 'Mended {gear} with {item} (+{n}%). {reason}', rep_poor: 'A rough fix with {item} (+{n}%). {reason}',
         rep_used_up: '{item} is used up.', rep_left: '{item}: {n}% left.', rep_err: 'Repair failed — check URL / key / model.',
-        stat_armor: 'Armor', stat_attack: 'Attack',
+        stat_armor: 'Armor', stat_attack: 'Attack', grade_1: 'Worn', grade_2: 'Honed', grade_3: 'Fine', grade_4: 'Legendary',
         inject_defense: 'Armor rating ~{def}', inject_weapon: 'wielding {name} (attack {atk})', inject_unarmed: 'unarmed',
         toast_outfit_gen: 'AI is putting together an outfit...', toast_outfit_done: 'Outfit generated!',
-        toast_outfit_err: 'Could not generate an outfit — check URL / key / model.',
+        toast_outfit_err: 'Could not generate an outfit — check URL / key / model.', toast_outfit_nodesc: 'No persona description found — fill your Persona description first.', toast_gradedrop: 'The grade dropped a tier.',
         toast_need_name: 'Enter an item name.',
         set_title: 'RPG Equipment (Outfit & Durability)', set_enable: 'Enable Equipment',
         set_api: 'API Settings', set_logic: 'Durability',
         set_decay_every: 'Durability drops every (messages):', set_decay_amount: 'Durability lost each time:',
         set_patch: 'Field-patch success chance (%):', set_depth: 'Context injection depth:',
-        set_patchwear: 'Max durability lost per field-patch:', set_affecthp: 'Armor reduces incoming damage (HP)', set_injectstats: 'Add armor/weapon stats to the prompt', set_autowear: 'AI wears gear from the story (damages the item the scene hits)', wear_changed: 'Wear:',
+        set_patchwear: 'Max durability lost per field-patch:', set_affecthp: 'Armor reduces incoming damage (HP)', set_injectstats: 'Add armor/weapon stats to the prompt', set_autowear: 'AI wears gear from the story (damages the item the scene hits)', set_startbroken: 'New gear starts broken (needs repair)', wear_changed: 'Wear:',
         set_lang: 'Language:', set_url: 'URL', set_key: 'API Key', set_model: 'Model'
     },
     ru: {
@@ -86,7 +110,7 @@ const I18N = {
         from_backpack: 'Надеть из рюкзака:', pick_item: '— выбери предмет —', or_new: '— или добавить новый —',
         unequip: 'Снять → в рюкзак', discard: 'Выбросить',
         toast_unequipped: 'В рюкзак: {name}.', toast_discarded: 'Предмет выброшен.',
-        set_aicheck: 'Проверять надевание через ИИ', toast_checking: 'Проверяю, подходит ли...', toast_wrong_slot: 'Нельзя надеть «{name}» в слот «{slot}»: {reason}', save: 'Сохранить', cancel: 'Отмена',
+        set_aicheck: 'Проверять надевание через ИИ', toast_checking: 'Проверяю, подходит ли...', toast_wrong_slot: 'Нельзя надеть «{name}» в слот «{slot}»: {reason}', wrong_type_reason: 'не тот тип предмета для этого слота', save: 'Сохранить', cancel: 'Отмена',
         name_ph: 'Название', desc_ph: 'Краткое описание (необязательно)', max_ph: 'Макс', dur_ph: 'Прочность',
         patch: 'Заплатка', repair: 'Починить', remove: 'Снять',
         edit_mode: 'Режим редактирования', auto_outfit: 'Наряд из моего описания',
@@ -100,16 +124,16 @@ const I18N = {
         rep_checking: 'Пробую починить...', rep_rejected: 'Нельзя починить с помощью «{item}»: {reason}',
         rep_ok: 'Починил {gear} с помощью «{item}» (+{n}%). {reason}', rep_poor: 'Кое-как залатал «{item}» (+{n}%). {reason}',
         rep_used_up: '«{item}» израсходован.', rep_left: '«{item}»: осталось {n}%.', rep_err: 'Починка не удалась — проверь URL / ключ / модель.',
-        stat_armor: 'Броня', stat_attack: 'Урон',
+        stat_armor: 'Броня', stat_attack: 'Урон', grade_1: 'Грубое', grade_2: 'Заточенное', grade_3: 'Тонкой работы', grade_4: 'Легендарное',
         inject_defense: 'Защита ~{def}', inject_weapon: 'в руках {name} (урон {atk})', inject_unarmed: 'без оружия',
         toast_outfit_gen: 'ИИ подбирает наряд...', toast_outfit_done: 'Наряд подобран!',
-        toast_outfit_err: 'Не удалось подобрать наряд — проверь URL / ключ / модель.',
+        toast_outfit_err: 'Не удалось подобрать наряд — проверь URL / ключ / модель.', toast_outfit_nodesc: 'Нет описания персоны — сначала заполни описание своей Персоны.', toast_gradedrop: 'Грейд упал на ступень.',
         toast_need_name: 'Введите название предмета.',
         set_title: 'RPG Equipment (экипировка и прочность)', set_enable: 'Включить экипировку',
         set_api: 'Настройки API', set_logic: 'Прочность',
         set_decay_every: 'Прочность падает каждые (сообщений):', set_decay_amount: 'Сколько прочности теряется за раз:',
         set_patch: 'Шанс успеха заплатки (%):', set_depth: 'Глубина вставки в контекст:',
-        set_patchwear: 'Потеря макс. прочности за заплатку:', set_affecthp: 'Броня снижает входящий урон (HP)', set_injectstats: 'Добавлять статы брони/оружия в подсказку', set_autowear: 'ИИ изнашивает экипировку по сюжету (снимает с той вещи, что задело)', wear_changed: 'Износ:',
+        set_patchwear: 'Потеря макс. прочности за заплатку:', set_affecthp: 'Броня снижает входящий урон (HP)', set_injectstats: 'Добавлять статы брони/оружия в подсказку', set_autowear: 'ИИ изнашивает экипировку по сюжету (снимает с той вещи, что задело)', set_startbroken: 'Новая экипировка появляется сломанной (нужен ремонт)', wear_changed: 'Износ:',
         set_lang: 'Язык:', set_url: 'URL', set_key: 'API-ключ', set_model: 'Модель'
     }
 };
@@ -193,10 +217,10 @@ function durColor(it) {
     return '#c0392b';
 }
 
-// armor each piece still provides, scaled by how intact it is (broken = nothing)
+// armor each piece still provides, scaled by how intact it is (broken = nothing) and its grade
 function pieceArmor(it) {
     if (!it || it.broken || it.dur <= 0 || !it.armor) return 0;
-    return Math.round(it.armor * (it.dur / (it.max || 100)));
+    return Math.round(it.armor * (it.dur / (it.max || 100)) * gradeMult(it.grade));
 }
 function totalDefense() {
     if (!state) return 0;
@@ -208,43 +232,49 @@ function weaponInfo() {
     if (!state) return null;
     const it = state.slots.weapon;
     if (!it) return null;
-    const atk = (it.broken || it.dur <= 0 || !it.attack) ? 0 : Math.round(it.attack * (it.dur / (it.max || 100)));
-    return { name: it.name, atk, broken: !!it.broken || it.dur <= 0 };
+    const atk = (it.broken || it.dur <= 0 || !it.attack) ? 0 : Math.round(it.attack * (it.dur / (it.max || 100)) * gradeMult(it.grade));
+    return { name: it.name, atk, broken: !!it.broken || it.dur <= 0, grade: clampGrade(it.grade) };
 }
 
 // a blow in combat wears the armour that took it (called by Vitals' damage())
+// when a piece shatters, it may also lose a quality tier ("градация случайно выпадает")
+function maybeGradeDrop(it) {
+    if (!it) return false;
+    if (clampGrade(it.grade) > 1 && Math.random() < 0.5) { it.grade = clampGrade(it.grade) - 1; return true; }
+    return false;
+}
 function combatWearArmor(raw) {
     if (!state) return;
-    const amt = Math.min(20, Math.max(1, Math.round((Math.abs(raw) || 0) * 0.4)));
+    const amt = Math.min(30, Math.max(2, Math.round((Math.abs(raw) || 0) * 0.6)));
     const worn = SLOTS.filter(s => s !== 'weapon' && state.slots[s] && !state.slots[s].broken && state.slots[s].dur > 0 && (state.slots[s].armor || 0) > 0);
     if (!worn.length) return;
     const s = worn[Math.floor(Math.random() * worn.length)];
     const it = state.slots[s];
     it.dur = Math.max(0, it.dur - amt);
-    if (it.dur <= 0) { it.dur = 0; it.broken = true; toastr.warning(t('toast_broke', { name: it.name })); }
+    if (it.dur <= 0) { it.dur = 0; it.broken = true; const dropped = maybeGradeDrop(it); toastr.warning(t('toast_broke', { name: it.name }) + (dropped ? ' ' + t('toast_gradedrop') : '')); }
     saveState(); renderPanel(); buildInjection();
 }
 
 function decayTick(messageId) {
     if (!settings.enabled || !state) return;
-    if (settings.autoWear) return; // AI narrative wear replaces the blind timer decay
     const msg = getContext().chat[messageId];
     if (!msg || msg.is_user || msg.is_system) return;
     state.msgCount = (state.msgCount || 0) + 1;
-    const every = Math.max(1, settings.decayEvery || 8);
+    const every = Math.max(1, settings.decayEvery || 6);
     if (state.msgCount % every !== 0) { saveState(); return; }
-
-    let broke = null;
+    // steady baseline wear every so often; when AI narrative wear is also on, use a lighter baseline
+    const base = settings.autoWear ? Math.max(1, Math.ceil((settings.decayAmount || 12) / 2)) : (settings.decayAmount || 12);
+    let broke = null, dropped = false;
     for (const s of SLOTS) {
         const it = state.slots[s];
         if (!it || it.broken) continue;
-        it.dur = Math.max(0, it.dur - (settings.decayAmount || 10));
-        if (it.dur <= 0) { it.broken = true; broke = it.name; }
+        it.dur = Math.max(0, it.dur - base);
+        if (it.dur <= 0) { it.broken = true; broke = it.name; if (maybeGradeDrop(it)) dropped = true; }
     }
     saveState();
     renderPanel();
     buildInjection();
-    if (broke) toastr.warning(t('toast_broke', { name: broke }));
+    if (broke) toastr.warning(t('toast_broke', { name: broke }) + (dropped ? ' ' + t('toast_gradedrop') : ''));
 }
 
 async function analyzeWear(messageId) {
@@ -274,7 +304,7 @@ Respond strictly JSON: {"wear":[{"slot":"bottom","amount":15,"reason":"<short, i
             const amt = Math.min(60, Math.max(1, parseInt(w.amount) || 0));
             it.dur = Math.max(0, it.dur - amt);
             notes.push(`${it.name} −${amt}%`);
-            if (it.dur <= 0) { it.broken = true; broke = it.name; }
+            if (it.dur <= 0) { it.broken = true; broke = it.name; maybeGradeDrop(it); }
         }
         if (notes.length) {
             saveState(); renderPanel(); buildInjection();
@@ -341,7 +371,12 @@ async function autoOutfit() {
     if (!settings.enabled) return;
     const ctx = getContext();
     let persona = '';
-    try { if (typeof ctx.substituteParams === 'function') persona = ctx.substituteParams('{{persona}}') || ''; } catch (e) { persona = ''; }
+    try {
+        if (typeof ctx.substituteParams === 'function') persona = ctx.substituteParams('{{persona}}') || '';
+        if (!persona || !persona.trim()) { try { persona = (window.power_user && window.power_user.persona_description) || ''; } catch (e) {} }
+        if (!persona || !persona.trim()) { try { const d = ctx.substituteParams('{{description}}') || ''; if (d && !/\{\{/.test(d)) persona = d; } catch (e) {} }
+    } catch (e) { persona = ''; }
+    if (!persona || !persona.trim()) { toastr.warning(t('toast_outfit_nodesc')); return; }
     const who = ctx.name1 || 'the player';
     toastr.info(t('toast_outfit_gen'));
     try {
@@ -354,7 +389,8 @@ Output strictly JSON: {"head":{"name":"","desc":""},"top":{"name":"","desc":""},
         for (const s of SLOTS) {
             const piece = res[s];
             if (piece && piece.name && !isNoneName(piece.name)) {
-                state.slots[s] = { id: genId(), name: String(piece.name), desc: String(piece.desc || ''), dur: 100, max: 100, broken: false, armor: SLOT_BASE_ARMOR[s] || 0, attack: SLOT_BASE_ATTACK[s] || 0 };
+                const st = startState(false);
+                state.slots[s] = { id: genId(), name: String(piece.name), desc: String(piece.desc || ''), dur: st.dur, max: 100, broken: st.broken, grade: rollGrade(), armor: SLOT_BASE_ARMOR[s] || 0, attack: SLOT_BASE_ATTACK[s] || 0 };
             } else if (piece && isNoneName(piece.name) && state.slots[s] && isNoneName(state.slots[s].name)) {
                 // clean up a previously auto-added "нет"/placeholder item
                 state.slots[s] = null;
@@ -368,6 +404,13 @@ Output strictly JSON: {"head":{"name":"","desc":""},"top":{"name":"","desc":""},
 }
 
 function invApi() { return (window.RPG && window.RPG.inventory && window.RPG.inventory.available) ? window.RPG.inventory : null; }
+function vitApi() { return (window.RPG && window.RPG.vitals && window.RPG.vitals.available) ? window.RPG.vitals : null; }
+// apply / drop the "while worn" effect a crafted piece carries
+function applyWornBuff(slot, buff) {
+    const vit = vitApi(); if (!vit || !buff || !buff.name) return;
+    vit.addBuff({ name: String(buff.name), effect: String(buff.effect || ''), kind: buff.kind === 'debuff' ? 'debuff' : 'buff', duration: null, tag: 'eq:' + slot });
+}
+function dropWornBuff(slot) { const vit = vitApi(); if (vit) vit.removeBuff('eq:' + slot); }
 const SLOT_MEANING = {
     head: 'headwear worn on the head: hats, hoods, helmets, crowns',
     top: 'upper-body clothing/armor: shirts, tunics, coats, chestplates',
@@ -389,6 +432,8 @@ async function equipFromInventory(slot, invId) {
     const inv = invApi(); if (!inv) return;
     const it = inv.list().find(i => i.id === invId);
     if (!it) return;
+    // hard type gate first — an accessory can't go on the torso, food can't be worn, etc.
+    if (!slotTypeOk(slot, it.type)) { toastr.warning(t('toast_wrong_slot', { name: it.name, slot: t('slot_' + slot), reason: t('wrong_type_reason') })); return; }
     if (settings.aiCheckEquip && settings.apiKey) {
         toastr.info(t('toast_checking'));
         try {
@@ -398,7 +443,9 @@ async function equipFromInventory(slot, invId) {
     }
     const max = (typeof it.max === 'number') ? it.max : 100;
     const dur = (typeof it.dur === 'number') ? it.dur : max;
-    state.slots[slot] = { id: genId(), name: it.name, desc: it.desc || '', type: it.type, dur: dur, max: max, broken: !!it.broken || dur <= 0, armor: (typeof it.armor === 'number') ? it.armor : (SLOT_BASE_ARMOR[slot] || 0), attack: (typeof it.attack === 'number') ? it.attack : (SLOT_BASE_ATTACK[slot] || 0) };
+    state.slots[slot] = { id: genId(), name: it.name, desc: it.desc || '', type: it.type, dur: dur, max: max, broken: !!it.broken || dur <= 0, grade: clampGrade(it.grade || rollGrade()), armor: (typeof it.armor === 'number') ? it.armor : (SLOT_BASE_ARMOR[slot] || 0), attack: (typeof it.attack === 'number') ? it.attack : (SLOT_BASE_ATTACK[slot] || 0), buff: (it.buff && it.buff.name) ? it.buff : undefined };
+    dropWornBuff(slot); // clear any leftover from a previous piece in this slot
+    if (state.slots[slot].buff) applyWornBuff(slot, state.slots[slot].buff);
     inv.remove(invId);
     pendingSlot = null; detailSlot = slot;
     saveState(); renderPanel(); buildInjection();
@@ -443,12 +490,14 @@ Respond strictly JSON: {"logical": true/false, "amount": <integer 0-100>, "reaso
 function unequipToInventory(slot) {
     const it = state.slots[slot]; if (!it) return;
     const inv = invApi();
-    if (inv) { inv.add({ name: it.name, desc: it.desc, type: it.type, dur: it.dur, max: it.max, broken: it.broken, armor: it.armor, attack: it.attack }); toastr.success(t('toast_unequipped', { name: it.name })); }
+    dropWornBuff(slot);
+    if (inv) { inv.add({ name: it.name, desc: it.desc, type: it.type, dur: it.dur, max: it.max, broken: it.broken, grade: clampGrade(it.grade), armor: it.armor, attack: it.attack, buff: it.buff }); toastr.success(t('toast_unequipped', { name: it.name })); }
     else { toastr.info(t('toast_discarded')); }
     state.slots[slot] = null; detailSlot = null;
     saveState(); renderPanel(); buildInjection();
 }
 function discardSlot(slot) {
+    dropWornBuff(slot);
     state.slots[slot] = null; detailSlot = null;
     saveState(); renderPanel(); buildInjection();
     toastr.info(t('toast_discarded'));
@@ -469,7 +518,7 @@ function buildInjection() {
         if (settings.injectStats !== false) {
             if (settings.affectHp) { const def = totalDefense(); if (def > 0) extra.push(t('inject_defense', { def })); }
             const w = weaponInfo();
-            if (w && w.atk > 0) extra.push(t('inject_weapon', { name: w.name, atk: w.atk }));
+            if (w && w.atk > 0) extra.push(t('inject_weapon', { name: w.name, atk: w.atk }) + (w.grade ? ` [${t('grade_' + w.grade)}]` : ''));
         }
         const tail = extra.length ? ` (${extra.join('; ')})` : '';
         text = `\n[${t('inject_wearing')} — ${parts.join('; ')}.${tail} ${t('inject_see')}.]\n`;
@@ -603,6 +652,7 @@ function buildReport() {
     return `<div class="eqd-rpt-in">
         <span class="eqd-kind">${escapeHtml(t('slot_' + sl))}</span>
         <h2 class="eqd-name">${escapeHtml(it.name)}</h2>
+        ${(it.attack || it.armor) ? `<div class="eqd-gradeline g${clampGrade(it.grade)}" style="--gcol:${GRADE_COLOR[clampGrade(it.grade)]}"><span class="eqd-gstars">${'★'.repeat(clampGrade(it.grade))}${'☆'.repeat(GRADE_MAX - clampGrade(it.grade))}</span> ${escapeHtml(t('grade_' + clampGrade(it.grade)))} <small>×${gradeMult(it.grade)}</small></div>` : ''}
         ${it.desc ? `<p class="eqd-desc">${escapeHtml(it.desc)}</p>` : ''}
         <div class="eqd-meta">
             <div class="eqd-armor">${EQ_ARMOR_SVG}<div><div class="eqd-l">${escapeHtml(statLbl)}</div><div class="eqd-v">${statVal}</div></div></div>
@@ -634,13 +684,15 @@ function renderPanel() {
         const it = state.slots[sl];
         const empty = !it;
         const pct = empty ? 0 : Math.max(0, Math.min(100, Math.round((it.dur / (it.max || 100)) * 100)));
-        const cls = (empty ? ' empty' : '') + (it && it.broken ? ' broken' : '') + (detailSlot === sl ? ' active' : '');
+        const cls = (empty ? ' empty' : '') + (it && it.broken ? ' broken' : '') + (detailSlot === sl ? ' active' : '') + ((!empty && (it.attack || it.armor)) ? (' graded g' + clampGrade(it.grade)) : '');
+        const gStyle = (!empty && (it.attack || it.armor)) ? ` style=\"left:${L.x}px;top:${L.y}px;--gcol:${GRADE_COLOR[clampGrade(it.grade)]}\"` : ` style=\"left:${L.x}px;top:${L.y}px;\"`;
         lines += `<line x1="${EQ_CENTER[0]}" y1="${EQ_CENTER[1]}" x2="${L.pin[0]}" y2="${L.pin[1]}" class="${empty ? 'eqd-dash' : ''}${(detailSlot === sl && !empty) ? ' eqd-on' : ''}"></line>`;
-        photos += `<div class="eqd-photo${cls}" data-slot="${sl}" style="left:${L.x}px;top:${L.y}px;" tabindex="0">
+        photos += `<div class="eqd-photo${cls}" data-slot="${sl}"${gStyle} tabindex="0">
             <div class="eqd-inner" style="--rot:${L.rot}deg">
                 <span class="eqd-pin"></span>
+                ${(!empty && (it.attack || it.armor)) ? `<span class="eqd-grade">${'★'.repeat(clampGrade(it.grade))}</span>` : ''}
                 <div class="eqd-pic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">${EQ_ICONS[sl]}</svg>${empty ? '' : `<div class="eqd-mini"><i style="width:${pct}%;background:${condGrad(pct)}"></i></div>`}</div>
-                <div class="eqd-cap"><div class="eqd-k">${escapeHtml(t('slot_' + sl))}</div><div class="eqd-n">${empty ? escapeHtml(t('empty')) : escapeHtml(it.name)}</div></div>
+                <div class="eqd-cap"><div class="eqd-k">${escapeHtml(t('slot_' + sl))}</div><div class="eqd-n">${empty ? escapeHtml(t('empty')) : escapeHtml(it.name)}${(!empty && (it.attack || it.armor)) ? ` <span class="eqd-capg" style="color:${GRADE_COLOR[clampGrade(it.grade)]}">${'★'.repeat(clampGrade(it.grade))}</span>` : ''}</div></div>
             </div></div>`;
     }
 
@@ -739,6 +791,7 @@ function settingsHtml() {
             <label class="checkbox_label"><input type="checkbox" id="rpg-eq-affecthp"> ${t('set_affecthp')}</label>
             <label class="checkbox_label"><input type="checkbox" id="rpg-eq-injectstats"> ${t('set_injectstats')}</label>
             <label class="checkbox_label"><input type="checkbox" id="rpg-eq-autowear"> ${t('set_autowear')}</label>
+            <label class="checkbox_label"><input type="checkbox" id="rpg-eq-startbroken"> ${t('set_startbroken')}</label>
             <div class="flex-container alignitemscenter flexgap5 margin-b-10">
                 <label>${t('set_depth')}</label>
                 <input type="number" id="rpg-eq-depth" class="text_pole" min="0" style="width:55px;">
@@ -778,6 +831,7 @@ function setupUI() {
     $('#rpg-eq-affecthp').prop('checked', settings.affectHp !== false).on('change', function () { settings.affectHp = this.checked; saveSettings(); buildInjection(); });
     $('#rpg-eq-injectstats').prop('checked', settings.injectStats !== false).on('change', function () { settings.injectStats = this.checked; saveSettings(); buildInjection(); });
     $('#rpg-eq-autowear').prop('checked', !!settings.autoWear).on('change', function () { settings.autoWear = this.checked; saveSettings(); });
+    $('#rpg-eq-startbroken').prop('checked', settings.startBroken !== false).on('change', function () { settings.startBroken = this.checked; saveSettings(); });
     $('#rpg-eq-depth').val(settings.injectDepth).on('change', function () { settings.injectDepth = parseInt($(this).val()); saveSettings(); buildInjection(); });
 }
 
@@ -804,8 +858,24 @@ window.RPG.equipment = {
         if (!state) return [];
         return SLOTS.map(s => {
             const it = state.slots[s];
-            return { slot: s, label: t('slot_' + s), item: it ? { name: it.name, desc: it.desc, dur: it.dur, max: it.max, broken: !!it.broken } : null };
+            return { slot: s, label: t('slot_' + s), item: it ? { name: it.name, desc: it.desc, dur: it.dur, max: it.max, broken: !!it.broken, grade: clampGrade(it.grade), gradeName: t('grade_' + clampGrade(it.grade)) } : null };
         });
+    },
+    // weapons/armour that can still be sharpened (grade < 4), for the craft module's sharpen picker
+    sharpenable: () => {
+        if (!state) return [];
+        return SLOTS.filter(s => { const it = state.slots[s]; return it && (it.attack || it.armor) && clampGrade(it.grade) < GRADE_MAX; })
+            .map(s => { const it = state.slots[s]; const g = clampGrade(it.grade); return { slot: s, label: t('slot_' + s), name: it.name, grade: g, gradeName: t('grade_' + g), nextGrade: g + 1 }; });
+    },
+    getGrade: (slot) => (state && state.slots[slot]) ? clampGrade(state.slots[slot].grade) : 0,
+    // raise a piece one tier (and fully restore its durability). Returns the new grade or 0.
+    sharpen: (slot) => {
+        if (!state || !state.slots[slot]) return 0;
+        const it = state.slots[slot]; const g = clampGrade(it.grade);
+        if (g >= GRADE_MAX) return g;
+        it.grade = g + 1; it.dur = it.max || 100; it.broken = false;
+        saveState(); renderPanel(); buildInjection();
+        return it.grade;
     },
     repairable: () => {
         if (!state) return [];
