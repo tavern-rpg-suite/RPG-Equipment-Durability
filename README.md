@@ -4,7 +4,7 @@ A SillyTavern extension that gives the player a worn **outfit** across six slots
 
 > Design principle: **the extension is the source of truth, the chat is just the narrator.** Durability and grade are computed by the extension — the model never does the math, it only reads a short state note. Part of the RPG suite: it exposes `window.RPG.equipment` (RPG Vitals reads it for armour/attack; RPG Vendors uses it to sharpen and repair) and can pull repair materials from `window.RPG.inventory`.
 
-**Version 1.11.3**
+**Version 1.11.1**
 
 ---
 
@@ -50,8 +50,9 @@ Exposes `window.RPG.equipment`: `isEnabled()`, `list()` (includes `grade` / `gra
 
 ## 🩺 Troubleshooting
 
-- **Grade reset after a page reload.** Fixed in 1.11.3 — discrete gear changes (equip, sharpen, repair, auto‑outfit) now save to disk immediately instead of via the ~1s debounced save, which could be dropped on a quick refresh. Frequent per‑message wear stays debounced. Grade is also normalised to a concrete value on load.
-- **The field patch repaired forever.** Fixed in 1.11.2 — each item allows only a few *successful* field patches (default 3, set **Field patches per item** in settings, 1–20). Since 1.11.3, a **proper repair renews the patch allowance**: sharpening, a vendor repair kit, repairing with a backpack material, or a GM full‑repair all reset the count. The button shows the remaining count and disables when spent; a failed attempt doesn't cost a charge, and the count travels with the piece through the backpack.
+- **Take gear off without edit mode.** Since 1.11.4 the item card (tap a slot) has a small **Unequip** button next to Patch — no need to enter edit mode to send a piece to the backpack.
+- **Grade re‑rolled when I unequipped and re‑equipped.** The root cause was in the **Inventory** module (Tavern RPG Engine), whose backpack bridge dropped `grade`/`armour`/`attack`/`patchesLeft` when storing and listing items — so re‑equip saw no grade and rolled a new one. Fixed in the Engine 1.13.3 (update both). This module already stored grade correctly; 1.11.3 also made equip/sharpen/repair save to disk immediately so an isolated change can't be lost on a quick reload.
+- **The field patch repaired forever.** Fixed in 1.11.2 — each item allows only a few *successful* field patches (default 3, set **Field patches per item** in settings, 1–20). Since 1.11.3, a **proper repair renews the patch allowance**: sharpening, a vendor repair kit, repairing with a backpack material, or a GM full‑repair all reset the count.
 - **Quality changed when I re‑equipped a piece.** Fixed in 1.11.0 — grade is stored on the item and kept through unequip/equip.
 - **I couldn't put shoes in Boots / a dress in Top.** Fixed in 1.11.1 — the slot‑type guard now only blocks clearly‑wrong types (weapon/accessory/food); ordinary clothing/`misc` goes on the body.
 - **"Outfit from my description" did nothing.** Fixed in 1.11.0 — it now reads your Persona description (with fallbacks) and warns clearly if there's no description to use.

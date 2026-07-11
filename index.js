@@ -669,8 +669,9 @@ function buildReport() {
         const patchBtn = pLeft > 0
             ? `<button class="eqd-btn eqd-btn-patch rpg-eq-patch" data-slot="${sl}">${escapeHtml(t('patch'))} (${pLeft})</button>`
             : `<button class="eqd-btn eqd-btn-patch rpg-eq-patch" data-slot="${sl}" disabled title="${escapeHtml(t('toast_patch_none'))}">${escapeHtml(t('patch'))} ✕</button>`;
+        const unequipBtn = `<button class="eqd-btn eqd-btn-ghost rpg-eq-unequip" data-slot="${sl}">${escapeHtml(t('unequip'))}</button>`;
         repairInner = `<div class="eqd-repair-h">${escapeHtml(t('repair_with'))}</div>
-            <div class="eqd-row">${patchBtn}</div>
+            <div class="eqd-row">${patchBtn}${unequipBtn}</div>
             ${mat}`;
     }
     return `<div class="eqd-rpt-in">
