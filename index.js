@@ -1,10 +1,10 @@
 import { getContext, extension_settings } from '../../../extensions.js';
-import { eventSource, event_types, saveSettingsDebounced, saveSettings as stSaveSettings, setExtensionPrompt, extension_prompt_roles, characters } from '../../../../script.js';
+import { eventSource, event_types, saveChatDebounced, saveSettingsDebounced, saveSettings as stSaveSettings, setExtensionPrompt, extension_prompt_roles, characters } from '../../../../script.js';
 
 const MODULE_NAME = 'rpg_equipment';
 const PROMPT_KEY = 'rpg_equipment_injection';
 const SLOTS = ['head', 'top', 'bottom', 'boots', 'accessory', 'weapon'];
-// ── Grade (градация) 1..4: multiplies a piece's base attack/armor, and drives its glow ──
+// ── Grade 1..4: multiplies a piece's base attack/armor, and drives its glow ──
 const GRADE_MAX = 4;
 const GRADE_MULT = { 1: 1, 2: 1.4, 3: 1.9, 4: 2.6 };           // stat multiplier per grade
 const GRADE_COLOR = { 1: '#9e9e9e', 2: '#4f83cc', 3: '#8a5cc4', 4: '#d9a441' }; // grey / blue / purple / gold
@@ -82,6 +82,7 @@ const I18N = {
         edit_mode: 'Edit mode', auto_outfit: 'Outfit from my description',
         state_good: 'good', state_worn: 'worn', state_tattered: 'tattered', state_broken: 'BROKEN',
         inject_wearing: "{{user}}'s current outfit", inject_see: '{{char}} can see this',
+        toast_restored: 'Equipment restored from the chat backup.',
         toast_equipped: 'Equipped: {name}', toast_removed: 'Slot cleared.',
         toast_patch_ok: 'Field patch held! +{n} durability.', toast_patch_fail: 'The patch did not hold.',
         toast_patch_none: "This piece is too frayed for another field patch — it needs a proper repair.", patch_left: '{n} patch(es) left.',
@@ -167,26 +168,79 @@ function saveSettings(immediate = true) {
 function freshState() {
     return { slots: { head: null, top: null, bottom: null, boots: null, accessory: null, weapon: null }, msgCount: 0 };
 }
-function loadState() {
-    const chatId = getContext().chatId;
-    if (!chatId) { state = freshState(); return; }
+// ---- chat ownership: this state belongs to one chat and is never written into another ----
+let currentChatId = null;   // chat the in-memory `state` belongs to
+let pendingChatId = null;   // id reported by CHAT_CHANGED, before the state is (re)loaded
+let stateReady = false;     // false while switching chats; saving is blocked
+
+function cloneState(s) { try { return JSON.parse(JSON.stringify(s)); } catch (e) { return freshState(); } }
+function normalizeState(s) {
+    if (!s || typeof s !== 'object') return freshState();
+    if (!s.slots) s.slots = freshState().slots;
+    for (const sl of SLOTS) if (!(sl in s.slots)) s.slots[sl] = null;
+    if (typeof s.msgCount !== 'number') s.msgCount = 0;
+    // hardening: any stat-bearing piece keeps a concrete valid grade in storage (never blank/undefined)
+    for (const sl of SLOTS) { const it = s.slots[sl]; if (it && (it.attack || it.armor)) it.grade = clampGrade(it.grade); }
+    return s;
+}
+
+function loadState(explicitId) {
+    const chatId = explicitId || pendingChatId || getContext().chatId;
+    if (!chatId) { currentChatId = null; pendingChatId = null; stateReady = false; state = freshState(); return; }
+    currentChatId = chatId; pendingChatId = null; stateReady = true;
+
     if (settings.chatStates[chatId]) {
-        state = settings.chatStates[chatId];
-        if (!state.slots) state.slots = freshState().slots;
-        for (const s of SLOTS) if (!(s in state.slots)) state.slots[s] = null;
-        if (typeof state.msgCount !== 'number') state.msgCount = 0;
-        // hardening: any stat-bearing piece keeps a concrete valid grade in storage (never blank/undefined)
-        for (const s of SLOTS) { const it = state.slots[s]; if (it && (it.attack || it.armor)) it.grade = clampGrade(it.grade); }
+        state = normalizeState(settings.chatStates[chatId]);
     } else {
-        state = freshState();
+        // Restore from the backup kept inside the chat. This is what carries worn gear, durability
+        // and grades over when a solo chat is converted to a group: the group gets a new chat id, so
+        // chatStates has no entry for it, but the copied messages still carry the backup.
+        // A chat holding only the greeting is a copy of nothing and is never restored into.
+        const chat = getContext().chat;
+        let restored = false;
+        if (chat && chat.length > 1) {
+            for (let i = chat.length - 1; i >= 0; i--) {
+                const cp = chat[i].extra && chat[i].extra.rpg_equipment_checkpoint;
+                if (cp && cp.slots && SLOTS.some(sl => cp.slots[sl])) {
+                    state = normalizeState(cloneState(cp));   // copy: never share objects with the chat file
+                    restored = true;
+                    break;
+                }
+            }
+        }
+        if (!restored) state = freshState();
         settings.chatStates[chatId] = state;
+        if (restored) { saveSettings(true); toastr.success(t('toast_restored')); }
     }
 }
+
 function saveState(immediate = true) {
-    const chatId = getContext().chatId;
-    if (chatId) settings.chatStates[chatId] = state;
+    if (!stateReady || !currentChatId) return;                 // mid-switch: do not write
+    const ctx = getContext();
+    if (ctx.chatId && ctx.chatId !== currentChatId) return;    // state belongs to a chat we left
+    settings.chatStates[currentChatId] = state;
     saveSettings(immediate);
+
+    // Backup inside the chat itself, as a copy. This is what survives a group conversion.
+    try {
+        const chat = ctx.chat;
+        if (chat && chat.length > 0) {
+            const lastMsg = chat[chat.length - 1];
+            if (!lastMsg.extra) lastMsg.extra = {};
+            lastMsg.extra.rpg_equipment_checkpoint = cloneState(state);
+            saveChatDebounced();
+        }
+    } catch (e) { console.error('[Equipment] checkpoint save failed:', e); }
 }
+
+// Ensure the state for the active chat is loaded before it is touched.
+function syncChat() {
+    const id = pendingChatId || getContext().chatId;
+    if (!id) return;
+    if (!stateReady || id !== currentChatId) loadState(id);
+}
+// True while the loaded state still belongs to the active chat. Guards async work.
+function ownsChat(id) { return !!(stateReady && id && currentChatId === id && getContext().chatId === id); }
 
 async function callAI(systemPrompt, userPrompt) {
     if (!settings.apiKey) throw new Error('API key is not set');
@@ -249,7 +303,7 @@ function weaponInfo() {
 }
 
 // a blow in combat wears the armour that took it (called by Vitals' damage())
-// when a piece shatters, it may also lose a quality tier ("градация случайно выпадает")
+// when a piece shatters, it may also lose a quality tier at random
 function maybeGradeDrop(it) {
     if (!it) return false;
     if (clampGrade(it.grade) > 1 && Math.random() < 0.5) { it.grade = clampGrade(it.grade) - 1; return true; }
@@ -291,6 +345,7 @@ function decayTick(messageId) {
 
 async function analyzeWear(messageId) {
     if (!settings.enabled || !settings.autoWear || !settings.apiKey || !state) return;
+    const myChat = currentChatId;
     const ctx = getContext();
     const msg = ctx.chat[messageId];
     if (!msg || msg.is_user || msg.is_system || !msg.mes) return;
@@ -306,6 +361,7 @@ ${worn.join('\n')}
 For each damaged item give its slot key and how much durability it loses (severity: a scuff/singe ~3-8, a burn/tear/cut ~12-30, severe ~40-60). Slot key must be exactly one of: head, top, bottom, boots, accessory, weapon.
 Respond strictly JSON: {"wear":[{"slot":"bottom","amount":15,"reason":"<short, in ${genLang()}>"}]}`;
         const res = await callAI(sys, String(msg.mes).slice(0, 1600));
+        if (!ownsChat(myChat)) return;   // chat changed during the request
         if (!res || !Array.isArray(res.wear) || !res.wear.length) return;
         const notes = [];
         let broke = null;
@@ -374,7 +430,7 @@ function equipSlot(slot, name, desc, max, dur) {
 }
 
 // Recognises "empty"/"none" answers the model sometimes returns for a slot,
-// so we leave that slot empty instead of equipping a bogus "нет" item.
+// so the slot is left empty rather than equipping a placeholder item.
 const NONE_WORDS = new Set(['', 'none', 'no', 'n/a', 'na', '-', '—', '–', 'empty', 'null', 'nothing',
     'нет', 'нету', 'ничего', 'пусто', 'отсутствует', 'не указано', 'нет данных']);
 function isNoneName(name) {
@@ -388,6 +444,7 @@ function isNoneName(name) {
 
 async function autoOutfit() {
     if (!settings.enabled) return;
+    const myChat = currentChatId;
     const ctx = getContext();
     let persona = '';
     try {
@@ -405,13 +462,14 @@ Fill a slot ONLY if the description clearly mentions or strongly implies an item
 Write ALL names and descriptions strictly in ${genLang()}.
 Output strictly JSON: {"head":{"name":"","desc":""},"top":{"name":"","desc":""},"bottom":{"name":"","desc":""},"boots":{"name":"","desc":""},"accessory":{"name":"","desc":""}}`;
         const res = await callAI(sys, `${who}'s own description:\n${String(persona).substring(0, 1200)}`);
+        if (!ownsChat(myChat)) return;   // chat changed during the request
         for (const s of SLOTS) {
             const piece = res[s];
             if (piece && piece.name && !isNoneName(piece.name)) {
                 const st = startState(false);
                 state.slots[s] = { id: genId(), name: String(piece.name), desc: String(piece.desc || ''), dur: st.dur, max: 100, broken: st.broken, grade: rollGrade(), armor: SLOT_BASE_ARMOR[s] || 0, attack: SLOT_BASE_ATTACK[s] || 0 };
             } else if (piece && isNoneName(piece.name) && state.slots[s] && isNoneName(state.slots[s].name)) {
-                // clean up a previously auto-added "нет"/placeholder item
+                // clean up a placeholder item added by an earlier auto-outfit run
                 state.slots[s] = null;
             }
         }
@@ -449,6 +507,7 @@ Respond strictly JSON: {"ok": true/false, "reason": "<one short sentence in ${ge
 }
 async function equipFromInventory(slot, invId) {
     const inv = invApi(); if (!inv) return;
+    const myChat = currentChatId;
     const it = inv.list().find(i => i.id === invId);
     if (!it) return;
     // hard type gate first — an accessory can't go on the torso, food can't be worn, etc.
@@ -457,6 +516,7 @@ async function equipFromInventory(slot, invId) {
         toastr.info(t('toast_checking'));
         try {
             const fit = await checkSlotFit(slot, it);
+            if (!ownsChat(myChat)) return;   // chat changed during the request
             if (!fit.ok) { toastr.warning(t('toast_wrong_slot', { name: it.name, slot: t('slot_' + slot), reason: fit.reason })); return; }
         } catch (e) { /* if the check fails, don't block the player */ }
     }
@@ -471,6 +531,7 @@ async function equipFromInventory(slot, invId) {
     toastr.success(t('toast_equipped', { name: it.name }));
 }
 async function repairWithItem(slot, invId) {
+    const myChat = currentChatId;
     const inv = invApi(); if (!inv) { toastr.warning(t('no_inv_repair')); return; }
     const gear = state.slots[slot];
     const mat = inv.list().find(i => i.id === invId);
@@ -484,6 +545,7 @@ Decide REALISTICALLY whether this material/tool could plausibly mend THIS item (
 If logical, choose how much durability a FULL fresh use would restore.
 Respond strictly JSON: {"logical": true/false, "amount": <integer 0-100>, "reason": "<one short sentence in ${genLang()}>"}`;
         const res = await callAI(sys, 'Judge the repair attempt.');
+        if (!ownsChat(myChat)) return;   // chat changed during the request
         if (!res.logical) { toastr.warning(t('rep_rejected', { item: mat.name, reason: res.reason || '' })); return; }
 
         const cond = (typeof mat.cond === 'number') ? mat.cond : 100;           // material's own condition 0-100
@@ -870,8 +932,12 @@ jQuery(() => {
     setupUI();
     if (getContext().chatId) { loadState(); renderButton(); buildInjection(); }
 
-    eventSource.on(event_types.CHAT_CHANGED, () => {
-        setTimeout(() => { loadState(); editMode = false; pendingSlot = null; renderButton(); renderPanel(); buildInjection(); }, 100);
+    eventSource.on(event_types.CHAT_CHANGED, (chatIdArg) => {
+        // Release the previous chat's state at once: other modules react to this event too, and a
+        // bridge call made before the switch completes must not save into the new chat.
+        stateReady = false; currentChatId = null; pendingChatId = chatIdArg || null;
+        state = freshState();
+        setTimeout(() => { loadState(pendingChatId || getContext().chatId); editMode = false; pendingSlot = null; renderButton(); renderPanel(); buildInjection(); }, 100);
     });
     eventSource.on(event_types.MESSAGE_RECEIVED, (id) => { decayTick(id); analyzeWear(id); });
 });
@@ -885,6 +951,7 @@ window.RPG.equipment = {
     available: true,
     isEnabled: () => !!settings.enabled,
     list: () => {
+        syncChat();
         if (!state) return [];
         return SLOTS.map(s => {
             const it = state.slots[s];
@@ -893,13 +960,15 @@ window.RPG.equipment = {
     },
     // weapons/armour that can still be sharpened (grade < 4), for the craft module's sharpen picker
     sharpenable: () => {
+        syncChat();
         if (!state) return [];
         return SLOTS.filter(s => { const it = state.slots[s]; return it && (it.attack || it.armor) && clampGrade(it.grade) < GRADE_MAX; })
             .map(s => { const it = state.slots[s]; const g = clampGrade(it.grade); return { slot: s, label: t('slot_' + s), name: it.name, grade: g, gradeName: t('grade_' + g), nextGrade: g + 1 }; });
     },
-    getGrade: (slot) => (state && state.slots[slot]) ? clampGrade(state.slots[slot].grade) : 0,
+    getGrade: (slot) => { syncChat(); return (state && state.slots[slot]) ? clampGrade(state.slots[slot].grade) : 0; },
     // raise a piece one tier (and fully restore its durability). Returns the new grade or 0.
     sharpen: (slot) => {
+        syncChat();
         if (!state || !state.slots[slot]) return 0;
         const it = state.slots[slot]; const g = clampGrade(it.grade);
         if (g >= GRADE_MAX) return g;
@@ -909,12 +978,14 @@ window.RPG.equipment = {
         return it.grade;
     },
     repairable: () => {
+        syncChat();
         if (!state) return [];
         return SLOTS.filter(s => { const it = state.slots[s]; return it && (it.broken || it.dur < it.max); })
             .map(s => { const it = state.slots[s]; return { slot: s, label: t('slot_' + s), name: it.name, desc: it.desc, dur: it.dur, max: it.max, broken: !!it.broken }; });
     },
     // amount = % of max to restore (null = full repair)
     repair: (slot, amount) => {
+        syncChat();
         if (!state || !state.slots[slot]) return false;
         const it = state.slots[slot];
         if (amount == null) it.dur = it.max || 100;
@@ -924,10 +995,10 @@ window.RPG.equipment = {
         saveState(); renderPanel(); buildInjection();
         return true;
     },
-    refresh: () => { loadState(); renderPanel(); buildInjection(); },
+    refresh: () => { loadState(getContext().chatId); renderPanel(); buildInjection(); },
     // mechanical stats other modules can read (scaled by durability; broken gear = 0)
     affectsHp: () => !!settings.affectHp,
-    defense: () => totalDefense(),
-    attack: () => { const w = weaponInfo(); return w ? w.atk : 0; },
-    wearArmor: (raw) => combatWearArmor(raw)
+    defense: () => { syncChat(); return totalDefense(); },
+    attack: () => { syncChat(); const w = weaponInfo(); return w ? w.atk : 0; },
+    wearArmor: (raw) => { syncChat(); return combatWearArmor(raw); }
 };
