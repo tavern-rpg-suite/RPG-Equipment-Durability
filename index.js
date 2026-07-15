@@ -50,8 +50,30 @@ const defaultSettings = {
     autoWear: false,
     injectDepth: 1,
     aiCheckEquip: true,
-    chatStates: {}
+    chatStates: {},
+    chatStamps: {}   // chatId -> last-used timestamp, lets stale states be pruned
 };
+
+// Per-chat gear states used to live in settings forever, bloating settings.json.
+// States untouched for STATE_TTL days are dropped; they remain recoverable from
+// the rpg_equipment_checkpoint backup written into the chat itself.
+const STATE_TTL_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
+function pruneOldStates() {
+    const now = Date.now();
+    let changed = false;
+    for (const id of Object.keys(settings.chatStates)) {
+        if (!settings.chatStamps[id]) { settings.chatStamps[id] = now; changed = true; continue; } // migrate
+        if (now - settings.chatStamps[id] > STATE_TTL_MS) {
+            delete settings.chatStates[id];
+            delete settings.chatStamps[id];
+            changed = true;
+        }
+    }
+    for (const id of Object.keys(settings.chatStamps)) {
+        if (!settings.chatStates[id]) { delete settings.chatStamps[id]; changed = true; }
+    }
+    if (changed) saveSettings(false);
+}
 
 let settings = {};
 let state = null;
@@ -152,6 +174,9 @@ function loadSettings() {
     if (!extension_settings[MODULE_NAME]) extension_settings[MODULE_NAME] = {};
     settings = Object.assign({}, defaultSettings, extension_settings[MODULE_NAME]);
     if (!settings.chatStates) settings.chatStates = {};
+    if (!settings.chatStamps) settings.chatStamps = {};
+    // heal NaN/garbage that an empty number input could have saved
+    if (!Number.isFinite(settings.injectDepth)) settings.injectDepth = defaultSettings.injectDepth;
 }
 function saveSettings(immediate = true) {
     extension_settings[MODULE_NAME] = settings;
@@ -188,6 +213,8 @@ function loadState(explicitId) {
     const chatId = explicitId || pendingChatId || getContext().chatId;
     if (!chatId) { currentChatId = null; pendingChatId = null; stateReady = false; state = freshState(); return; }
     currentChatId = chatId; pendingChatId = null; stateReady = true;
+    if (!settings.chatStamps) settings.chatStamps = {};
+    settings.chatStamps[chatId] = Date.now();   // touch: keeps this chat's state from being pruned
 
     if (settings.chatStates[chatId]) {
         state = normalizeState(settings.chatStates[chatId]);
@@ -219,6 +246,8 @@ function saveState(immediate = true) {
     const ctx = getContext();
     if (ctx.chatId && ctx.chatId !== currentChatId) return;    // state belongs to a chat we left
     settings.chatStates[currentChatId] = state;
+    if (!settings.chatStamps) settings.chatStamps = {};
+    settings.chatStamps[currentChatId] = Date.now();
     saveSettings(immediate);
 
     // Backup inside the chat itself, as a copy. This is what survives a group conversion.
@@ -317,7 +346,7 @@ function combatWearArmor(raw) {
     const s = worn[Math.floor(Math.random() * worn.length)];
     const it = state.slots[s];
     it.dur = Math.max(0, it.dur - amt);
-    if (it.dur <= 0) { it.dur = 0; it.broken = true; const dropped = maybeGradeDrop(it); toastr.warning(t('toast_broke', { name: it.name }) + (dropped ? ' ' + t('toast_gradedrop') : '')); }
+    if (it.dur <= 0) { it.dur = 0; it.broken = true; const dropped = maybeGradeDrop(it); toastr.warning(t('toast_broke', { name: escapeHtml(it.name) }) + (dropped ? ' ' + t('toast_gradedrop') : '')); }
     saveState(false); renderPanel(); buildInjection();
 }
 
@@ -340,7 +369,21 @@ function decayTick(messageId) {
     saveState(false);
     renderPanel();
     buildInjection();
-    if (broke) toastr.warning(t('toast_broke', { name: broke }) + (dropped ? ' ' + t('toast_gradedrop') : ''));
+    if (broke) toastr.warning(t('toast_broke', { name: escapeHtml(broke) }) + (dropped ? ' ' + t('toast_gradedrop') : ''));
+}
+
+// A bot turn's wear (decay tick + AI narrative wear) must apply EXACTLY ONCE per message.
+// Swiping/regenerating re-fires MESSAGE_RECEIVED for the same message, which used to
+// advance the decay counter and re-run the wear analysis again (double damage).
+// Same per-message marker pattern as RPG-Vitals.
+function onBotMessage(id) {
+    syncChat();   // wear must apply to the chat the message actually belongs to
+    const msg = getContext().chat[id];
+    if (!msg || msg.is_user || msg.is_system) return;
+    if (msg.rpg_eq_done === true) return;   // already handled — this fire is a swipe / regen
+    msg.rpg_eq_done = true;                 // mark up-front so re-entrant fires are ignored too
+    decayTick(id);
+    analyzeWear(id);
 }
 
 async function analyzeWear(messageId) {
@@ -371,13 +414,13 @@ Respond strictly JSON: {"wear":[{"slot":"bottom","amount":15,"reason":"<short, i
             if (!it || it.broken) continue;
             const amt = Math.min(60, Math.max(1, parseInt(w.amount) || 0));
             it.dur = Math.max(0, it.dur - amt);
-            notes.push(`${it.name} −${amt}%`);
+            notes.push(`${escapeHtml(it.name)} −${amt}%`);
             if (it.dur <= 0) { it.broken = true; broke = it.name; maybeGradeDrop(it); }
         }
         if (notes.length) {
             saveState(false); renderPanel(); buildInjection();
             toastr.info(t('wear_changed') + ' ' + notes.join(', '));
-            if (broke) toastr.warning(t('toast_broke', { name: broke }));
+            if (broke) toastr.warning(t('toast_broke', { name: escapeHtml(broke) }));
         }
     } catch (e) { /* silent: never disrupt chat */ }
 }
@@ -411,9 +454,10 @@ function repairItem(slot) {
     it.dur = it.max || 100; it.broken = false;
     it.patchesLeft = Math.max(1, parseInt(settings.patchLimit) || 3); // a proper repair renews field patches
     saveState(); renderPanel(); buildInjection();
-    toastr.success(t('toast_repaired', { name: it.name }));
+    toastr.success(t('toast_repaired', { name: escapeHtml(it.name) }));
 }
 function removeSlot(slot) {
+    dropWornBuff(slot);   // never leave an orphaned "while worn" buff in Vitals
     state.slots[slot] = null;
     saveState(); renderPanel(); buildInjection();
     toastr.info(t('toast_removed'));
@@ -423,10 +467,11 @@ function equipSlot(slot, name, desc, max, dur) {
     let d = parseInt(dur);
     if (!isFinite(d)) d = m;              // blank → full
     d = Math.max(0, Math.min(m, d));      // clamp to 0..max
+    dropWornBuff(slot);   // a manually added piece has no buff — clear any leftover from the old one
     state.slots[slot] = { id: genId(), name: name, desc: desc || '', dur: d, max: m, broken: d <= 0, grade: rollGrade(), armor: SLOT_BASE_ARMOR[slot] || 0, attack: SLOT_BASE_ATTACK[slot] || 0 };
     pendingSlot = null;
     saveState(); renderPanel(); buildInjection();
-    toastr.success(t('toast_equipped', { name }));
+    toastr.success(t('toast_equipped', { name: escapeHtml(name) }));
 }
 
 // Recognises "empty"/"none" answers the model sometimes returns for a slot,
@@ -466,10 +511,13 @@ Output strictly JSON: {"head":{"name":"","desc":""},"top":{"name":"","desc":""},
         for (const s of SLOTS) {
             const piece = res[s];
             if (piece && piece.name && !isNoneName(piece.name)) {
+                dropWornBuff(s);   // the replaced piece may carry a "while worn" buff — clear it,
+                                   // or it would stay applied in Vitals forever (orphaned eq: tag)
                 const st = startState(false);
                 state.slots[s] = { id: genId(), name: String(piece.name), desc: String(piece.desc || ''), dur: st.dur, max: 100, broken: st.broken, grade: rollGrade(), armor: SLOT_BASE_ARMOR[s] || 0, attack: SLOT_BASE_ATTACK[s] || 0 };
             } else if (piece && isNoneName(piece.name) && state.slots[s] && isNoneName(state.slots[s].name)) {
                 // clean up a placeholder item added by an earlier auto-outfit run
+                dropWornBuff(s);
                 state.slots[s] = null;
             }
         }
@@ -511,14 +559,17 @@ async function equipFromInventory(slot, invId) {
     const it = inv.list().find(i => i.id === invId);
     if (!it) return;
     // hard type gate first — an accessory can't go on the torso, food can't be worn, etc.
-    if (!slotTypeOk(slot, it.type)) { toastr.warning(t('toast_wrong_slot', { name: it.name, slot: t('slot_' + slot), reason: t('wrong_type_reason') })); return; }
+    if (!slotTypeOk(slot, it.type)) { toastr.warning(t('toast_wrong_slot', { name: escapeHtml(it.name), slot: t('slot_' + slot), reason: t('wrong_type_reason') })); return; }
     if (settings.aiCheckEquip && settings.apiKey) {
         toastr.info(t('toast_checking'));
         try {
             const fit = await checkSlotFit(slot, it);
             if (!ownsChat(myChat)) return;   // chat changed during the request
-            if (!fit.ok) { toastr.warning(t('toast_wrong_slot', { name: it.name, slot: t('slot_' + slot), reason: fit.reason })); return; }
+            if (!fit.ok) { toastr.warning(t('toast_wrong_slot', { name: escapeHtml(it.name), slot: t('slot_' + slot), reason: escapeHtml(fit.reason) })); return; }
         } catch (e) { /* if the check fails, don't block the player */ }
+        // the item could have been eaten/sold/consumed while the AI was thinking —
+        // equipping the stale copy then would duplicate it out of thin air
+        if (!inv.list().some(i => i.id === invId)) return;
     }
     const max = (typeof it.max === 'number') ? it.max : 100;
     const dur = (typeof it.dur === 'number') ? it.dur : max;
@@ -528,7 +579,7 @@ async function equipFromInventory(slot, invId) {
     inv.remove(invId);
     pendingSlot = null; detailSlot = slot;
     saveState(); renderPanel(); buildInjection();
-    toastr.success(t('toast_equipped', { name: it.name }));
+    toastr.success(t('toast_equipped', { name: escapeHtml(it.name) }));
 }
 async function repairWithItem(slot, invId) {
     const myChat = currentChatId;
@@ -546,7 +597,9 @@ If logical, choose how much durability a FULL fresh use would restore.
 Respond strictly JSON: {"logical": true/false, "amount": <integer 0-100>, "reason": "<one short sentence in ${genLang()}>"}`;
         const res = await callAI(sys, 'Judge the repair attempt.');
         if (!ownsChat(myChat)) return;   // chat changed during the request
-        if (!res.logical) { toastr.warning(t('rep_rejected', { item: mat.name, reason: res.reason || '' })); return; }
+        if (!res.logical) { toastr.warning(t('rep_rejected', { item: escapeHtml(mat.name), reason: escapeHtml(res.reason || '') })); return; }
+        // the material could have been eaten/sold while the AI was thinking
+        if (!inv.list().some(i => i.id === invId)) return;
 
         const cond = (typeof mat.cond === 'number') ? mat.cond : 100;           // material's own condition 0-100
         const baseChance = (typeof mat.chance === 'number') ? mat.chance : 60;  // its success rating
@@ -563,8 +616,8 @@ Respond strictly JSON: {"logical": true/false, "amount": <integer 0-100>, "reaso
         // wear the material; delete it at 0
         const wearPerUse = 34; // ~3 uses from a fresh material
         const r = inv.consumeAsMaterial(invId, wearPerUse);
-        const tail = r.consumed ? t('rep_used_up', { item: mat.name }) : t('rep_left', { item: mat.name, n: r.left });
-        toastr.success(t(good ? 'rep_ok' : 'rep_poor', { gear: gear.name, item: mat.name, n: restore, reason: (res.reason || '') }) + ' ' + tail);
+        const tail = r.consumed ? t('rep_used_up', { item: escapeHtml(mat.name) }) : t('rep_left', { item: escapeHtml(mat.name), n: r.left });
+        toastr.success(t(good ? 'rep_ok' : 'rep_poor', { gear: escapeHtml(gear.name), item: escapeHtml(mat.name), n: restore, reason: escapeHtml(res.reason || '') }) + ' ' + tail);
         saveState(); renderPanel(); buildInjection();
     } catch (e) { toastr.error(t('rep_err')); }
 }
@@ -572,7 +625,7 @@ function unequipToInventory(slot) {
     const it = state.slots[slot]; if (!it) return;
     const inv = invApi();
     dropWornBuff(slot);
-    if (inv) { inv.add({ name: it.name, desc: it.desc, type: it.type, dur: it.dur, max: it.max, broken: it.broken, grade: clampGrade(it.grade), armor: it.armor, attack: it.attack, buff: it.buff, patchesLeft: it.patchesLeft }); toastr.success(t('toast_unequipped', { name: it.name })); }
+    if (inv) { inv.add({ name: it.name, desc: it.desc, type: it.type, dur: it.dur, max: it.max, broken: it.broken, grade: clampGrade(it.grade), armor: it.armor, attack: it.attack, buff: it.buff, patchesLeft: it.patchesLeft }); toastr.success(t('toast_unequipped', { name: escapeHtml(it.name) })); }
     else { toastr.info(t('toast_discarded')); }
     state.slots[slot] = null; detailSlot = null;
     saveState(); renderPanel(); buildInjection();
@@ -619,7 +672,9 @@ function renderButton() {
                 <div class="rpg-eq-body" id="rpg-eq-body"></div>
             </div>`);
         makeModalDraggable(document.getElementById('rpg-eq-modal'), document.getElementById('rpg-eq-drag'));
-        $('#rpg-eq-modal .rpg-modal-close').on('click', () => $('#rpg-eq-modal').removeClass('visible'));
+        // Delegated + namespaced: a direct binding used to be stripped by sibling
+        // extensions doing a blanket $('.rpg-modal-close').off('click').
+        $(document).off('click.rpgEqClose').on('click.rpgEqClose', '#rpg-eq-modal .rpg-modal-close', () => $('#rpg-eq-modal').removeClass('visible'));
         window.addEventListener('resize', () => { if ($('#rpg-eq-modal').hasClass('visible')) fitDossier(); });
     }
     if (!settings.enabled) { $('#rpg-eq-btn').hide(); return; }
@@ -924,11 +979,12 @@ function setupUI() {
     $('#rpg-eq-injectstats').prop('checked', settings.injectStats !== false).on('change', function () { settings.injectStats = this.checked; saveSettings(); buildInjection(); });
     $('#rpg-eq-autowear').prop('checked', !!settings.autoWear).on('change', function () { settings.autoWear = this.checked; saveSettings(); });
     $('#rpg-eq-startbroken').prop('checked', settings.startBroken !== false).on('change', function () { settings.startBroken = this.checked; saveSettings(); });
-    $('#rpg-eq-depth').val(settings.injectDepth).on('change', function () { settings.injectDepth = parseInt($(this).val()); saveSettings(); buildInjection(); });
+    $('#rpg-eq-depth').val(settings.injectDepth).on('change', function () { settings.injectDepth = Math.max(0, parseInt($(this).val()) || 0); $(this).val(settings.injectDepth); saveSettings(); buildInjection(); });
 }
 
 jQuery(() => {
     loadSettings();
+    pruneOldStates();
     setupUI();
     if (getContext().chatId) { loadState(); renderButton(); buildInjection(); }
 
@@ -939,7 +995,7 @@ jQuery(() => {
         state = freshState();
         setTimeout(() => { loadState(pendingChatId || getContext().chatId); editMode = false; pendingSlot = null; renderButton(); renderPanel(); buildInjection(); }, 100);
     });
-    eventSource.on(event_types.MESSAGE_RECEIVED, (id) => { decayTick(id); analyzeWear(id); });
+    eventSource.on(event_types.MESSAGE_RECEIVED, (id) => onBotMessage(id));
 });
 
 // ============================================================
