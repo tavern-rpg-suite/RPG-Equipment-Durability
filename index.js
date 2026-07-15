@@ -83,6 +83,15 @@ let detailSlot = null;
 
 function genId() { return Math.random().toString(36).substr(2, 9); }
 
+// Junk instead of a string from the model (-1, bare numbers, "null") must never
+// become an equipped item's name. A real name must contain at least one letter.
+function aiName(x, fallback = null, maxLen = 60) {
+    const s = String(x == null ? '' : x).trim();
+    if (s.length < 2 || !/\p{L}/u.test(s)) return fallback;
+    if (/^(null|undefined|n\/?a|none|нет|-?\d+)$/i.test(s)) return fallback;
+    return s.slice(0, maxLen);
+}
+
 function escapeHtml(x) {
     return String(x ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -497,20 +506,33 @@ async function autoOutfit() {
         if (!persona || !persona.trim()) { try { persona = (window.power_user && window.power_user.persona_description) || ''; } catch (e) {} }
         if (!persona || !persona.trim()) { try { const d = ctx.substituteParams('{{description}}') || ''; if (d && !/\{\{/.test(d)) persona = d; } catch (e) {} }
     } catch (e) { persona = ''; }
-    if (!persona || !persona.trim()) { toastr.warning(t('toast_outfit_nodesc')); return; }
     const who = ctx.name1 || 'the player';
+    // The persona is often not where the outfit lives: it is described in the first message,
+    // in the scenario, or changes mid-story ("she slips into the red dress"). Read those too —
+    // and if the persona is empty, the story alone is still enough to dress from.
+    const chat = ctx.chat || [];
+    const firstMsg = chat.length ? String(chat[0].mes || '').substring(0, 900) : '';
+    const recent = chat.slice(-8).filter(m => !m.is_system).map(m => `${m.name}: ${String(m.mes || '').substring(0, 400)}`).join('\n').slice(-1600);
+    if ((!persona || !persona.trim()) && !firstMsg && !recent) { toastr.warning(t('toast_outfit_nodesc')); return; }
     toastr.info(t('toast_outfit_gen'));
     try {
         const sys = `You are dressing the PLAYER character (the user, named "${who}") in an RPG — this is the USER's own gear, NOT the AI character's.
-Read the player's OWN description below and identify what THEY wear and carry as clothing/gear across these slots: head, top, bottom, boots, accessory.
-Fill a slot ONLY if the description clearly mentions or strongly implies an item for it. If the player has nothing for a slot (for example no headwear), leave that slot's name EMPTY ("") — do NOT invent a default, and never write placeholder words like "none" or "нет". Keep names short (1-4 words) and descriptions one short sentence.
+From the material below, identify what "${who}" THEMSELVES currently wears and carries as clothing/gear across these slots: head, top, bottom, boots, accessory.
+Priority when sources disagree: the RECENT SCENE is the most current (the player may have changed clothes), then the STORY OPENING, then the player description. Ignore what other characters wear.
+Fill a slot ONLY if the material clearly mentions or strongly implies an item for it on "${who}". If the player has nothing for a slot (for example no headwear), leave that slot's name EMPTY ("") — do NOT invent a default, and never write placeholder words like "none" or "нет". Keep names short (1-4 words) and descriptions one short sentence.
 Write ALL names and descriptions strictly in ${genLang()}.
 Output strictly JSON: {"head":{"name":"","desc":""},"top":{"name":"","desc":""},"bottom":{"name":"","desc":""},"boots":{"name":"","desc":""},"accessory":{"name":"","desc":""}}`;
-        const res = await callAI(sys, `${who}'s own description:\n${String(persona).substring(0, 1200)}`);
+        const usr = [
+            (persona && persona.trim()) ? `${who}'s own description:\n${String(persona).substring(0, 1200)}` : '',
+            firstMsg ? `STORY OPENING:\n${firstMsg}` : '',
+            recent ? `RECENT SCENE (most current):\n${recent}` : ''
+        ].filter(Boolean).join('\n\n');
+        const res = await callAI(sys, usr);
         if (!ownsChat(myChat)) return;   // chat changed during the request
         for (const s of SLOTS) {
             const piece = res[s];
-            if (piece && piece.name && !isNoneName(piece.name)) {
+            if (piece && aiName(piece.name) && !isNoneName(piece.name)) {
+                piece.name = aiName(piece.name);
                 dropWornBuff(s);   // the replaced piece may carry a "while worn" buff — clear it,
                                    // or it would stay applied in Vitals forever (orphaned eq: tag)
                 const st = startState(false);
