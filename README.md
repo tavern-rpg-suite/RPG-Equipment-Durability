@@ -43,22 +43,3 @@ Grade lives on the item and is **preserved when you unequip and re‑equip** (it
 ## 🧠 How it works
 
 Every *N* messages each equipped piece loses durability; at 0 it breaks (stays equipped, shown broken, maybe a tier lower). The current outfit — condition **and grade** — is injected each turn so the character narrates around it. If armour stats are on, worn pieces reduce incoming HP damage in RPG Vitals and the weapon sets your (grade‑scaled) attack.
-
-## 🔌 Cross‑extension bridge
-
-Exposes `window.RPG.equipment`: `isEnabled()`, `list()` (includes `grade` / `gradeName`), `sharpenable()`, `getGrade(slot)`, `sharpen(slot)`, `repairable()`, `repair(slot, amount)`, plus armour/attack totals consumed by RPG Vitals. Reads `window.RPG.inventory` to repair with backpack materials when present.
-
-## 🩺 Troubleshooting
-
-- **Worn gear resets when a solo chat is converted to a group.** Fixed in 1.12.0. State was stored only under the chat id in `extension_settings`, and a group conversion produces a new chat id, so nothing was found for it. Equipment is now also backed up inside the chat itself (`rpg_equipment_checkpoint` on the last message), the same way the Engine backs up the backpack, so the copied messages carry slots, durability and grades into the group chat. A chat containing only its greeting is never restored from a checkpoint.
-- **State leaking between chats.** Fixed in 1.12.0. The state is owned by a single chat: while SillyTavern swaps chats nothing is saved, and a bridge call made mid-switch can no longer write the previous chat's gear under the new chat id.
-
-- **Take gear off without edit mode.** Since 1.11.4 the item card (tap a slot) has a small **Unequip** button next to Patch — no need to enter edit mode to send a piece to the backpack.
-- **Grade re‑rolled when I unequipped and re‑equipped.** The root cause was in the **Inventory** module (Tavern RPG Engine), whose backpack bridge dropped `grade`/`armour`/`attack`/`patchesLeft` when storing and listing items — so re‑equip saw no grade and rolled a new one. Fixed in the Engine 1.13.3 (update both). This module already stored grade correctly; 1.11.3 also made equip/sharpen/repair save to disk immediately so an isolated change can't be lost on a quick reload.
-- **The field patch repaired forever.** Fixed in 1.11.2 — each item allows only a few *successful* field patches (default 3, set **Field patches per item** in settings, 1–20). Since 1.11.3, a **proper repair renews the patch allowance**: sharpening, a vendor repair kit, repairing with a backpack material, or a GM full‑repair all reset the count.
-- **Quality changed when I re‑equipped a piece.** Fixed in 1.11.0 — grade is stored on the item and kept through unequip/equip.
-- **I couldn't put shoes in Boots / a dress in Top.** Fixed in 1.11.1 — the slot‑type guard now only blocks clearly‑wrong types (weapon/accessory/food); ordinary clothing/`misc` goes on the body.
-- **"Outfit from my description" did nothing.** Fixed in 1.11.0 — it now reads your Persona description (with fallbacks) and warns clearly if there's no description to use.
-- **Durability barely moved.** Fixed in 1.11.0 — a steady baseline wear now always applies (AI wear stacks on top); tune the interval/amount in settings.
-- **Grade shows only after re‑equipping.** Fixed in 1.10.1 — grade (with stars + a detail line) shows immediately; grade 1 is subtle by design.
-- **Auto‑outfit / AI checks do nothing.** They need a working URL / key / model.
