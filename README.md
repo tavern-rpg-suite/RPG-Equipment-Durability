@@ -4,7 +4,7 @@ A SillyTavern extension that gives the player a worn **outfit** across six slots
 
 > Design principle: **the extension is the source of truth, the chat is just the narrator.** Durability and grade are computed by the extension — the model never does the math, it only reads a short state note. Part of the RPG suite: it exposes `window.RPG.equipment` (RPG Vitals reads it for armour/attack; RPG Vendors uses it to sharpen and repair) and can pull repair materials from `window.RPG.inventory`.
 
-**Version 1.11.1**
+**Version 1.12.3**
 
 ---
 
