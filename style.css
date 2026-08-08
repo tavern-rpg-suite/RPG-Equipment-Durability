@@ -276,3 +276,9 @@
 #rpg-eq-body .eqd-sel { flex:1; min-width:140px; background:#f7efda; border:1px solid var(--edge); border-radius:8px;
     font-family:"PT Mono",monospace; font-size:11px; color:var(--ink-soft); padding:0 10px; cursor:pointer; min-height:38px; }
 @media (prefers-reduced-motion:reduce){ #rpg-eq-body .eqd *{ animation:none !important; } }
+
+/* ---- redraw, not first open: skip the entry animations ----
+   Clicking a slot rebuilds the whole dossier, which replayed the drop-in on every
+   card and the stamp thump each time. On a redraw they are simply already there. */
+#rpg-eq-body .eqd.eqd-redraw .eqd-photo { animation: none; }
+#rpg-eq-body .eqd.eqd-redraw .eqd-stamp { animation: none; opacity: .55; }
