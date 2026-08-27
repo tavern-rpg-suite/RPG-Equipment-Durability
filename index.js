@@ -767,20 +767,65 @@ function renderButton() {
     }
     if (!settings.enabled) { $('#rpg-eq-btn').hide(); return; }
     $('#rpg-eq-btn').show();
-    $('#rpg-eq-btn').off('click').on('click', () => { renderPanel(); $('#rpg-eq-modal').toggleClass('visible'); });
+    $('#rpg-eq-btn').off('click').on('click', () => {
+        renderPanel();
+        const m = document.getElementById('rpg-eq-modal');
+        // Cleared here, where the opening animation is supposed to start, so a window
+        // that was dragged last time still pops the next time it is opened.
+        if (m && !m.classList.contains('visible')) m.style.animation = '';
+        $('#rpg-eq-modal').toggleClass('visible');
+    });
 }
 
 function makeModalDraggable(elmnt, handle) {
-    let p1 = 0, p2 = 0, p3 = 0, p4 = 0;
     if (!handle) return;
     handle.onmousedown = (e) => {
         if (e.target.closest('.rpg-modal-close')) return;
-        e.preventDefault(); p3 = e.clientX; p4 = e.clientY;
-        document.onmouseup = () => { document.onmouseup = null; document.onmousemove = null; };
-        document.onmousemove = (ev) => {
-            ev.preventDefault(); p1 = p3 - ev.clientX; p2 = p4 - ev.clientY; p3 = ev.clientX; p4 = ev.clientY;
-            elmnt.style.top = (elmnt.offsetTop - p2) + 'px'; elmnt.style.left = (elmnt.offsetLeft - p1) + 'px';
+        e.preventDefault();
+
+        /* The canonical approach: remember how far the pointer is from the window's
+           corner, then keep that distance for the whole drag. Nothing is written to
+           transform at all.
+
+           The previous version moved the window with transform, which is the same
+           property the opening animation and the fit-to-width scaling use — they
+           overwrote each other, and the window drifted the wrong way. Writing left and
+           top directly cannot collide with any of them.
+
+           Layout is still never read during the drag: the one measurement happens on
+           mousedown, and the writes are batched into one animation frame. */
+        const rect = elmnt.getBoundingClientRect();
+        const shiftX = e.clientX - rect.left;
+        const shiftY = e.clientY - rect.top;
+
+        let x = rect.left, y = rect.top, queued = false;
+
+        const paint = () => {
+            queued = false;
+            elmnt.style.left = x + 'px';
+            elmnt.style.top = y + 'px';
         };
+
+        // Position it once up front so the very first frame is already correct even if
+        // the window was placed by a CSS rule rather than by an earlier drag.
+        elmnt.style.left = rect.left + 'px';
+        elmnt.style.top = rect.top + 'px';
+
+        const onMove = (ev) => {
+            ev.preventDefault();
+            x = ev.clientX - shiftX;
+            y = ev.clientY - shiftY;
+            if (!queued) { queued = true; requestAnimationFrame(paint); }
+        };
+
+        const onUp = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            paint();                       // commit the last position, unqueued
+        };
+
+        document.addEventListener('mousemove', onMove, { passive: false });
+        document.addEventListener('mouseup', onUp);
     };
 }
 
@@ -894,12 +939,21 @@ function buildReport() {
 function fitDossier() {
     const d = document.getElementById('rpg-eq-dossier');
     if (!d) return;
-    d.style.transform = 'scale(1)'; // reset to measure natural size
-    const naturalH = d.offsetHeight || 720;
+    /* This is the jitter. Resetting the scale to 1 makes the browser lay the whole
+       dossier out at full size, offsetHeight is read from that state, and only then
+       is the real scale put back — so between the two paints the card genuinely jumps
+       to full size and shrinks again, on every single redraw.
+
+       Measured before anything is written instead: getBoundingClientRect reports the
+       SCALED height, so the previous scale is divided back out to recover the natural
+       one. One write, nothing to see. */
+    const prev = d.dataset.scale ? parseFloat(d.dataset.scale) : 1;
+    const naturalH = (d.getBoundingClientRect().height / (prev || 1)) || 720;
     const availW = Math.min(460, window.innerWidth * 0.96) - 4;
     const availH = window.innerHeight - 60;
     const s = Math.min(1, availW / 500, availH / naturalH);
     d.style.transform = 'scale(' + s + ')';
+    d.dataset.scale = String(s);
     if (d.parentElement) d.parentElement.style.height = (naturalH * s) + 'px';
 }
 
@@ -955,7 +1009,6 @@ function renderPanel() {
     // opposed to a first open; the CSS skips the drop and the stamp for it.
     if (eqdOpened) body.find('.eqd').addClass('eqd-redraw');
     eqdOpened = true;
-
     body.find('.rpg-eq-auto').off('click').on('click', autoOutfit);
     body.find('.eqd-close').off('click').on('click', () => (eqdOpened = false, $('#rpg-eq-modal').removeClass('visible')));
     body.find('#eqd-edit').off('click').on('click', function () { editMode = !editMode; renderPanel(); });

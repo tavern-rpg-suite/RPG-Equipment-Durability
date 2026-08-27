@@ -282,3 +282,17 @@
    card and the stamp thump each time. On a redraw they are simply already there. */
 #rpg-eq-body .eqd.eqd-redraw .eqd-photo { animation: none; }
 #rpg-eq-body .eqd.eqd-redraw .eqd-stamp { animation: none; opacity: .55; }
+
+/* The two that were missed, and they are the ones you actually see.
+
+   eqd-rise runs on the report's contents — the name, the type, the description — so
+   clicking any slot made that whole block fade up from below again. That is the flash
+   in the lower half.
+
+   The graded cards keep their glow and their shine: those loop forever and are part
+   of how the item reads. Only the drop-in half of the pair is dropped, so a rare item
+   still shimmers on a redraw without falling into place again. */
+#rpg-eq-body .eqd.eqd-redraw .eqd-rpt-in { animation: none; }
+#rpg-eq-body .eqd.eqd-redraw .eqd-photo.graded.g2 .eqd-inner { animation: eqd-glow 2.6s ease-in-out infinite; }
+#rpg-eq-body .eqd.eqd-redraw .eqd-photo.graded.g3 .eqd-inner { animation: eqd-glow 2.1s ease-in-out infinite; }
+#rpg-eq-body .eqd.eqd-redraw .eqd-photo.graded.g4 .eqd-inner { animation: eqd-glow 1.6s ease-in-out infinite; }
