@@ -173,10 +173,37 @@ const I18N = {
         set_lang: 'Язык:', set_url: 'URL', set_key: 'API-ключ', set_model: 'Модель'
     }
 };
+/* Names are escaped before they go into a notification, but toastr shows them as
+   text — so an apostrophe arrived as "&#39;" and stayed that way. Escaping is still
+   right for anything that lands in the panel's markup; this decodes on the way out. */
+function unesc(v) {
+    return String(v ?? '')
+        .replace(/&#0?39;/g, "'").replace(/&apos;/g, "'")
+        .replace(/&quot;/g, '"')
+        .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/&#x2F;/gi, '/')
+        .replace(/&amp;/g, '&');   // last, or the ampersands of the others come back
+}
+
+(function () {
+    if (!window.toastr || window.toastr.__eqUnesc) return;
+    ['success', 'info', 'warning', 'error'].forEach(k => {
+        const orig = toastr[k];
+        if (typeof orig !== 'function') return;
+        toastr[k] = function (msg, title, opts) {
+            return orig.call(toastr, unesc(msg), title === undefined ? title : unesc(title), opts);
+        };
+    });
+    window.toastr.__eqUnesc = true;
+})();
+
 function t(key, vars) {
     const lang = settings.language === 'ru' ? 'ru' : 'en';
     let str = (I18N[lang] && I18N[lang][key] !== undefined) ? I18N[lang][key] : (I18N.en[key] !== undefined ? I18N.en[key] : key);
     if (vars) for (const k in vars) str = str.split('{' + k + '}').join(vars[k]);
+    // {{user}} and {{char}} are deliberately left alone: they only appear in the
+    // prompt injections, and SillyTavern substitutes those itself when it assembles
+    // the prompt. Replacing them here as well would be doing the same work twice.
     return str;
 }
 
@@ -518,6 +545,14 @@ function patchItem(slot) {
         it.patchesLeft = Math.max(0, it.patchesLeft - 1); // only a patch that HOLDS uses up a charge
         toastr.success(t('toast_patch_ok', { n: gain }) + ' ' + t('patch_left', { n: it.patchesLeft }));
     } else {
+        /* A failed patch used to leave durability untouched while the ceiling had just
+           been lowered — and the bar shows durability AGAINST the ceiling, so the
+           percentage went UP. The item looked repaired by failing to repair it.
+
+           Durability now drops by the same amount the ceiling did, so a failed attempt
+           gains nothing and frays the garment a little, which is what the wear was
+           always meant to represent. */
+        if (wear > 0) it.dur = Math.max(0, it.dur - wear);
         it.dur = Math.min(it.max || 100, it.dur);
         toastr.error(t('toast_patch_fail'));
     }
