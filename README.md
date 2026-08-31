@@ -1,5 +1,9 @@
 # RPG Equipment & Durability
 
+<p>
+<img width="1717" height="916" alt="image" src="https://github.com/user-attachments/assets/fe182c75-cf96-4346-9ded-6b602163947b" />
+</p>
+
 A SillyTavern extension that gives the player a worn **outfit** across six slots, each with a **durability** bar that wears down as the story goes on and eventually **breaks**, plus a **4‑tier quality grade** on weapons and armour. The current outfit (condition + grade) is quietly injected into the prompt each turn, so the character can *see* what you're wearing — a torn coat, broken boots, a **legendary** blade.
 
 > Design principle: **the extension is the source of truth, the chat is just the narrator.** Durability and grade are computed by the extension — the model never does the math, it only reads a short state note. Part of the RPG suite: it exposes `window.RPG.equipment` (RPG Vitals reads it for armour/attack; RPG Vendors uses it to sharpen and repair) and can pull repair materials from `window.RPG.inventory`.
