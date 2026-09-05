@@ -20,7 +20,6 @@ A SillyTavern extension that gives the player a worn **outfit** across six slots
 - ⭐ **Quality grades (1–4)** — every weapon/armour piece has a grade: **Worn → Honed → Fine → Legendary**, which **multiplies** its attack/armour (×1 / ×1.4 / ×1.9 / ×2.6). Grade shows as coloured stars in the slot caption and a full line in the detail card, plus a coloured **glow** (grey/blue/purple/gold) with a gentle pulse and a **gold shimmer** on Legendary.
 - 🎲 **Grades arrive at random** — gear that enters the world rolls a weighted grade: Legendary is only ~3%. You mostly reach Legendary by **sharpening** (in the Vendors module), not by luck.
 - 🧱 **Start broken (optional, on by default)** — new gear arrives broken and needs repair; toggle it off in settings if you'd rather start intact.
-- 💥 **Shatter can cost a tier** — when a piece breaks in combat/wear, there's a chance its grade drops one step ("градация случайно выпадает").
 - ⚙️ **Steady decay** — every *N* messages each worn piece loses durability; at 0 it breaks. With **AI wear** on, an extra hit lands on the *specific* garment the scene damaged.
 - 🚫 **Slot‑type guard** — you can't wear a weapon as a hat, an accessory on the torso, or eat‑ables as armour; sensible clothing/armour goes anywhere on the body (fine cases handled by an optional AI check).
 - 🩹 **Field patch** & 🛠️ **Edit mode** — improvised low‑chance repair, and full manual control (repair, clear, add by hand with a starting durability).
