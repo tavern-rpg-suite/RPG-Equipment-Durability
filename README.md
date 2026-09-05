@@ -11,8 +11,9 @@ A SillyTavern extension that gives the player a worn **outfit** across six slots
 **Version 1.12.4**
 
 ---
-
 ## ✨ Features
+
+<img width="483" height="678" alt="Screenshot_22" src="https://github.com/user-attachments/assets/a5f653c3-2c72-4387-9ee6-c3fe17fb4bb1" />
 
 - 🧥 **Six slots** — Head · Top · Bottom · Boots · Accessory · Weapon — on a "case‑file / dossier" card.
 - 📉 **Durability** — each piece has a bar (current / max) and a state word: *good → worn → tattered → BROKEN*. A broken item stays equipped (shown as damaged) so the scene can react.
