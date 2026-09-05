@@ -48,3 +48,6 @@ Grade lives on the item and is **preserved when you unequip and re‑equip** (it
 ## 🧠 How it works
 
 Every *N* messages each equipped piece loses durability; at 0 it breaks (stays equipped, shown broken, maybe a tier lower). The current outfit — condition **and grade** — is injected each turn so the character narrates around it. If armour stats are on, worn pieces reduce incoming HP damage in RPG Vitals and the weapon sets your (grade‑scaled) attack.
+---
+## ✨ Screenshots
+<img width="1895" height="864" alt="Preview-RPG Equipment   Durability" src="https://github.com/user-attachments/assets/de39ae61-7216-4df3-a9c5-137e9d72e2c3" />
